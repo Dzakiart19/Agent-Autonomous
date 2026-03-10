@@ -135,6 +135,13 @@
       color:var(--muted);transition:all .15s;box-shadow:var(--shadow);flex-shrink:0}
     .header-btn:hover{background:var(--surface2)}
     .header-btn svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:2}
+    #computer-btn{display:flex;align-items:center;gap:5px;padding:0 10px;height:32px;
+      border-radius:8px;border:1px solid var(--border);background:var(--surface);
+      cursor:pointer;font-size:12px;font-weight:500;color:var(--muted2);
+      transition:all .15s;box-shadow:var(--shadow);flex-shrink:0;white-space:nowrap}
+    #computer-btn:hover{background:var(--surface2);color:var(--text)}
+    #computer-btn.on{background:var(--brand);color:#fff;border-color:var(--brand)}
+    #computer-btn svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;flex-shrink:0}
 
     /* ── Chat Area ── */
     #chat-area{flex:1;overflow-y:auto;padding:24px 0 12px;scroll-behavior:smooth;overflow-x:hidden}
@@ -209,6 +216,26 @@
     .typing-dot:nth-child(2){animation-delay:.2s}
     .typing-dot:nth-child(3){animation-delay:.4s}
     @keyframes bounce{0%,60%,100%{transform:translateY(0);opacity:.4}30%{transform:translateY(-5px);opacity:1}}
+
+    /* Thinking indicator (Manus-style) */
+    .thinking-row{padding:4px 16px;max-width:720px;margin:0 auto;width:100%;animation:fadeUp .18s ease}
+    .thinking-inner{display:inline-flex;align-items:center;gap:10px;padding:10px 14px;
+      background:var(--surface);border:1px solid var(--border);border-radius:14px;box-shadow:var(--shadow)}
+    .thinking-orb{position:relative;width:20px;height:20px;flex-shrink:0}
+    .thinking-orb-ring{position:absolute;inset:0;border-radius:50%;border:2px solid var(--brand);
+      animation:thinkRing 2s ease-in-out infinite}
+    .thinking-orb-core{position:absolute;inset:5px;border-radius:50%;background:var(--brand);
+      animation:thinkCore 2s ease-in-out infinite}
+    @keyframes thinkRing{0%,100%{transform:scale(1);opacity:.3}50%{transform:scale(1.35);opacity:.7}}
+    @keyframes thinkCore{0%,100%{transform:scale(1);opacity:.8}50%{transform:scale(.7);opacity:1}}
+    .thinking-lines{display:flex;flex-direction:column;gap:3px}
+    .thinking-label{font-size:13px;font-weight:500;color:var(--text2)}
+    .thinking-sub{font-size:11.5px;color:var(--muted);display:flex;align-items:center;gap:5px}
+    .thinking-sub-dot{width:4px;height:4px;border-radius:50%;background:var(--brand);
+      animation:subDotPulse 1.4s ease-in-out infinite;flex-shrink:0}
+    .thinking-sub-dot:nth-child(2){animation-delay:.2s}
+    .thinking-sub-dot:nth-child(3){animation-delay:.4s}
+    @keyframes subDotPulse{0%,60%,100%{transform:scale(1);opacity:.3}30%{transform:scale(1.4);opacity:1}}
 
     /* Step rows */
     .msg-step{padding:2px 16px;max-width:720px;margin:0 auto;width:100%;animation:fadeUp .15s ease}
@@ -297,10 +324,11 @@
       display:flex;flex-direction:column;height:100dvh;
     }
     #tool-panel.open{width:50%;min-width:300px}
-    #tool-panel-inner{display:flex;flex-direction:column;height:100%;min-width:300px}
+    #tool-panel-inner{display:flex;flex-direction:column;height:100%;min-width:300px;position:relative;overflow:hidden}
 
     #tp-header{display:flex;align-items:center;gap:8px;padding:0 14px;
-      height:var(--header-h);border-bottom:1px solid var(--border);flex-shrink:0;background:var(--surface)}
+      height:var(--header-h);border-bottom:1px solid var(--border);flex-shrink:0;background:var(--surface);
+      position:relative;z-index:10}
     #tp-title{font-size:13px;font-weight:600;color:var(--text);flex:1}
     .tp-btn{width:26px;height:26px;border-radius:6px;border:1px solid var(--border);background:var(--surface2);
       cursor:pointer;display:flex;align-items:center;justify-content:center;color:var(--muted);transition:all .15s}
@@ -435,6 +463,10 @@
       </button>
       <div class="header-title" id="chat-title">Dzeck AI</div>
       <div class="status-dot" id="status-dot"></div>
+      <button id="computer-btn" onclick="toggleComputerPanel()" title="Komputer Dzeck">
+        <svg viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+        Komputer
+      </button>
     </header>
 
     <div id="chat-area">
@@ -628,6 +660,7 @@ function renderHistory() {
 const S = {
   currentSession: null,
   sessionId: null,
+  vncPort: 6081,
   rfb: null,
   isTakeover: false,
   abortCtrl: null,
@@ -703,6 +736,47 @@ function scrollBottom(force) {
   if (force || d < 200) chatEl.scrollTo({ top: chatEl.scrollHeight, behavior: 'smooth' });
 }
 
+const THINK_LABELS = [
+  'Menganalisa permintaan...',
+  'Merancang rencana...',
+  'Menyiapkan langkah...',
+];
+let S_thinkLabelTimer = null;
+function showThinking() {
+  hideThinking();
+  const row = document.createElement('div');
+  row.className = 'thinking-row';
+  row.id = 'thinking-row';
+  row.innerHTML = `
+    <div class="thinking-inner">
+      <div class="thinking-orb">
+        <div class="thinking-orb-ring"></div>
+        <div class="thinking-orb-core"></div>
+      </div>
+      <div class="thinking-lines">
+        <div class="thinking-label">Dzeck sedang berpikir...</div>
+        <div class="thinking-sub" id="thinking-sub-text">
+          <div class="thinking-sub-dot"></div>
+          <div class="thinking-sub-dot"></div>
+          <div class="thinking-sub-dot"></div>
+        </div>
+      </div>
+    </div>`;
+  chatEl.appendChild(row);
+  scrollBottom(true);
+  let i = 0;
+  S_thinkLabelTimer = setInterval(() => {
+    const el = document.getElementById('thinking-sub-text');
+    if (!el) { clearInterval(S_thinkLabelTimer); return; }
+    el.innerHTML = `<span style="color:var(--muted2);font-size:11.5px">${THINK_LABELS[i % THINK_LABELS.length]}</span>`;
+    i++;
+  }, 1800);
+}
+function hideThinking() {
+  clearInterval(S_thinkLabelTimer);
+  document.getElementById('thinking-row')?.remove();
+}
+
 function showToast(msg, type='error') {
   const t = document.getElementById('toast');
   t.textContent = msg;
@@ -727,7 +801,7 @@ function setStreaming(v) {
 function switchToConv() {
   if (S.started) return;
   S.started = true;
-  if (emptyEl.parentNode) emptyEl.remove();
+  document.getElementById('empty-state')?.remove();
   inputArea.style.display = 'block';
   setTimeout(() => inputEl.focus(), 80);
 }
@@ -766,7 +840,12 @@ function startNewChat() {
   planBarEl.classList.remove('visible');
   tpToolInfo.style.display = 'none';
   tpUrlbar.style.display = 'none';
+  tpSS.style.display = 'none';
+  tpSS.src = '';
+  tpEmpty.style.display = 'flex';
+  tpStatus.textContent = 'Menunggu...';
   document.getElementById('chat-title').textContent = 'Dzeck AI';
+  S.vncPort = 6081;
   inputArea.style.display = 'none';
 
   // Reset chat area to welcome
@@ -841,7 +920,7 @@ function appendUserMsg(text, noSwitch) {
 }
 
 function createAiMsg() {
-  if (emptyEl.parentNode) emptyEl.remove();
+  document.getElementById('empty-state')?.remove();
   const wrap = document.createElement('div');
   wrap.className = 'msg-ai';
   wrap.innerHTML = `
@@ -1020,11 +1099,34 @@ function updateToolChip(tcId, evt) {
 // ═══════════════════════════════════════════════════
 function showToolPanel() {
   toolPanel.classList.add('open');
+  document.getElementById('computer-btn').classList.add('on');
+  if (S.latestScreenshot) {
+    tpSS.src = S.latestScreenshot;
+    tpSS.style.display = 'block';
+    tpEmpty.style.display = 'none';
+    tpStatus.textContent = 'Screenshot diperbarui';
+  } else {
+    tpSS.style.display = 'none';
+    tpEmpty.style.display = 'flex';
+    tpStatus.textContent = 'Menunggu...';
+  }
+  if (!S.rfb) {
+    setTimeout(() => connectVNC(S.vncPort || 6081), 300);
+  }
 }
 
 function hideToolPanel() {
   toolPanel.classList.remove('open');
+  document.getElementById('computer-btn').classList.remove('on');
   disconnectVNC();
+}
+
+function toggleComputerPanel() {
+  if (toolPanel.classList.contains('open')) {
+    hideToolPanel();
+  } else {
+    showToolPanel();
+  }
 }
 
 function updatePanelTool(type, label, arg, icon) {
@@ -1088,14 +1190,19 @@ function connectVNC(wsPort) {
   try {
     S.rfb = new window._RFB(vncCont, wsUrl, { credentials:{password:''}, shared:true, wsProtocols:['binary'] });
     S.rfb.scaleViewport = true; S.rfb.viewOnly = true;
+    vncCont.style.display = 'none';
+    let vncWasConnected = false;
     S.rfb.addEventListener('connect', () => {
+      vncWasConnected = true;
       vncCont.style.display='block'; tpSS.style.display='none'; tpEmpty.style.display='none';
       tpLive.classList.add('on'); tpStatus.textContent='Browser terhubung (LIVE)';
     });
     S.rfb.addEventListener('disconnect', () => {
       vncCont.style.display='none'; tpLive.classList.remove('on');
-      if (S.latestScreenshot) { tpSS.src=S.latestScreenshot; tpSS.style.display='block'; }
-      tpStatus.textContent='Koneksi LIVE terputus'; S.rfb=null;
+      if (S.latestScreenshot) { tpSS.src=S.latestScreenshot; tpSS.style.display='block'; tpEmpty.style.display='none'; }
+      else { tpSS.style.display='none'; tpEmpty.style.display='flex'; }
+      tpStatus.textContent = vncWasConnected ? 'Koneksi LIVE terputus' : 'Menunggu...';
+      S.rfb=null;
     });
   } catch(e) { S.rfb=null; }
 }
@@ -1127,12 +1234,7 @@ function handleEvent(evt) {
 
     case 'session':
       S.sessionId = evt.session_id;
-      // NOTE: Do NOT auto-show tool panel or connect VNC here.
-      // Panel only opens when tool events come in.
-      if (evt.vnc_ws_port) {
-        // Connect VNC silently in background — it will show when tools are called
-        setTimeout(() => connectVNC(evt.vnc_ws_port), 500);
-      }
+      S.vncPort = evt.vnc_ws_port || 6081;
       break;
 
     case 'title':
@@ -1143,6 +1245,7 @@ function handleEvent(evt) {
     case 'plan': {
       const plan = evt.plan;
       const status = evt.status||'';
+      if ((status==='creating'||status==='created'||status==='running')&&plan) hideThinking();
       if ((status==='created'||status==='running')&&plan) {
         S.plan = plan;
         if (S.aiBodyEl) { S.aiBodyEl.closest('.msg-ai')?.remove(); S.aiBodyEl=null; S.aiContent=''; }
@@ -1198,12 +1301,14 @@ function handleEvent(evt) {
     }
 
     case 'message_start':
+      hideThinking();
       if (S.aiBodyEl) { S.aiBodyEl.innerHTML=renderMarkdown(S.aiContent); S.aiBodyEl.removeAttribute('id'); }
       S.aiBodyEl = createAiMsg(); S.aiContent='';
       break;
 
     case 'message_chunk':
       if (evt.chunk) {
+        hideThinking();
         if (!S.aiBodyEl) { S.aiBodyEl=createAiMsg(); S.aiContent=''; }
         S.aiContent += evt.chunk;
         S.aiBodyEl.innerHTML = renderMarkdown(S.aiContent)+'<span class="cursor"></span>';
@@ -1227,6 +1332,7 @@ function handleEvent(evt) {
 
     case 'done': finalize(); break;
     case 'error':
+      hideThinking();
       showToast(evt.error||'Terjadi kesalahan');
       if (S.aiBodyEl) { S.aiBodyEl.innerHTML=`<em style="color:var(--error)">Gagal: ${esc(evt.error||'Error')}</em>`; S.aiBodyEl=null; }
       break;
@@ -1234,6 +1340,7 @@ function handleEvent(evt) {
 }
 
 function finalize() {
+  hideThinking();
   if (S.aiBodyEl && S.aiContent) { S.aiBodyEl.innerHTML=renderMarkdown(S.aiContent); S.aiBodyEl.removeAttribute('id'); }
   else if (S.aiBodyEl) { S.aiBodyEl.closest('.msg-ai')?.remove(); }
   S.aiBodyEl=null; S.aiContent='';
@@ -1265,6 +1372,7 @@ async function doSend(text) {
   tpToolInfo.style.display='none'; tpStatus.textContent='Memproses...';
 
   setStreaming(true);
+  try { showThinking(); } catch(e) { console.warn('[think]', e); }
   S.abortCtrl = new AbortController();
 
   try {

@@ -47,7 +47,7 @@ if $PYTHON -m pip install --help 2>&1 | grep -q 'break-system'; then
   PIP_FLAGS="--break-system-packages"
 fi
 
-# Current required packages (synced with project state)
+# Current required packages (synced with project state Mar 2026)
 PYTHON_PACKAGES=(
   "pydantic>=2.0.0"
   "beautifulsoup4>=4.12.0"
@@ -55,20 +55,20 @@ PYTHON_PACKAGES=(
   "aiohttp>=3.9.0"
   "playwright>=1.40.0"
   "websockify>=0.11.0"
+  "motor>=3.7.0"
+  "redis>=5.0.0"
+  "g4f>=0.3.0"
+  "flask>=3.0.0"
+  "flask-cors>=4.0.0"
 )
 
 for pkg in "${PYTHON_PACKAGES[@]}"; do
   pkg_name="${pkg%%[>=<]*}"
-  import_name="${pkg_name//-/_}"
-  if $PYTHON -c "import ${import_name}" &>/dev/null 2>&1; then
-    print_ok "$pkg_name (already installed)"
+  echo -n "  Checking $pkg_name..."
+  if $PYTHON -m pip install $PIP_FLAGS "$pkg" -q 2>&1; then
+    print_ok "$pkg_name ready"
   else
-    echo -n "  Installing $pkg_name..."
-    if $PYTHON -m pip install $PIP_FLAGS "$pkg" -q 2>&1; then
-      print_ok " done"
-    else
-      print_warn " failed — you may need to install manually"
-    fi
+    print_warn "$pkg_name install failed — may need manual install"
   fi
 done
 

@@ -21,9 +21,12 @@ Implements Manus-like autonomous agent architecture with class-based tools, Plan
 ## Key Features
 
 - **Manus-like Web UI**: Full redesign di `server/templates/web-chat.html` dengan Manus-style interface
+  - **Welcome → Chat Transition**: switchToConv() uses dynamic DOM query to always remove current #empty-state; works correctly after startNewChat() recreates welcome screen
+  - **Komputer Button**: Header button untuk toggle computer panel secara manual (bukan hanya saat tool dipanggil)
+  - **VNC Live View**: websockify installed, VNC stack (Xvfb + x11vnc + websockify) fully functional; panel auto-connects when opened
   - **Plan Cards**: Plan agent tampil sebagai expandable card dalam chat, real-time update
   - **Tool Items**: Setiap tool call tampil dengan spinner (calling) → checkmark (called) → X (error)
-  - **Komputer Dzeck Panel**: Panel bawah yang dapat dikembangkan, menampilkan browser screenshot real-time
+  - **Komputer Dzeck Panel**: Side panel yang bisa dibuka manual atau otomatis saat tool dipanggil, menampilkan browser screenshot real-time + VNC live stream
   - **Perencana Tab**: Overview semua plan steps dengan status (completed/running/pending)
   - **Clean Chat**: Hanya respons AI final yang tampil di chat, tool activity tersembunyi rapi di bawah steps
   - **Browser Screenshot**: Screenshot langsung dari Playwright browser muncul di tool card dan panel bawah
