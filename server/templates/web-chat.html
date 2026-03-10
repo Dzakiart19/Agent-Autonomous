@@ -793,7 +793,8 @@ function setStreaming(v) {
     stopBtn.style.display = v ? 'flex' : 'none';
     inputEl.disabled = v;
   }
-  document.getElementById('welcome-send-btn').disabled = v;
+  const wsb = document.getElementById('welcome-send-btn');
+  if (wsb) wsb.disabled = v;
   document.getElementById('status-dot').style.background = v ? 'var(--warning)' : 'var(--success)';
   if (!v && S.started) setTimeout(() => inputEl.focus(), 100);
 }
