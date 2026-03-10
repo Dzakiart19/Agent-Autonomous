@@ -117,7 +117,7 @@ export function useChat() {
               content: event.tool_name || "Tool",
               timestamp: new Date(event.timestamp || new Date()),
               toolName: event.tool_name,
-              toolArgs: event.tool_args,
+              toolArgs: event.function_args,
               isLoading: true,
             };
             addMessage(toolMessage);
@@ -144,7 +144,10 @@ export function useChat() {
         };
 
         try {
-          apiService.agent(text, onEvent, onError, onComplete).then((cancel) => {
+          apiService.agent(
+            { message: text, messages: [] },
+            { onMessage: onEvent, onError, onDone: onComplete }
+          ).then((cancel) => {
             cancelRef.current = cancel;
           });
         } catch (error) {

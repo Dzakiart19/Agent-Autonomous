@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState } from "react";
 import {
   View,
   Text,
@@ -9,108 +9,82 @@ import {
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 
-interface Tool {
+export interface ToolItem {
   tool_call_id: string;
   name: string;
-  status: "pending" | "running" | "completed" | "failed";
+  status: "calling" | "called" | "error";
   input?: any;
-  output?: any;
+  output?: string;
   error?: string;
+  tool_content?: any;
 }
 
 interface ToolPanelProps {
+  tools?: ToolItem[];
+  isVisible?: boolean;
+  onToggleVisible?: () => void;
   sessionId?: string;
-  onResize?: (width: number) => void;
 }
 
-export function ToolPanel({ sessionId, onResize }: ToolPanelProps) {
-  const [tools, setTools] = useState<Tool[]>([]);
-  const [selectedTool, setSelectedTool] = useState<Tool | null>(null);
-  const [isExpanded, setIsExpanded] = useState(false);
+const TOOL_ICON_MAP: Record<string, keyof typeof Ionicons.glyphMap> = {
+  browser: "globe",
+  shell: "terminal",
+  file: "document-text",
+  search: "search",
+  mcp: "extension-puzzle",
+};
 
-  const getToolIcon = (toolName: string) => {
-    const iconMap: { [key: string]: string } = {
-      file_read: "document-text",
-      file_write: "create",
-      file_delete: "trash",
-      browser: "globe",
-      shell: "terminal",
-      search: "search",
-      mcp: "settings",
-    };
-    return iconMap[toolName] || "settings";
-  };
+const TOOL_COLOR_MAP: Record<string, string> = {
+  browser: "#007AFF",
+  shell: "#30D158",
+  file: "#FF9F0A",
+  search: "#BF5AF2",
+  mcp: "#0A84FF",
+};
 
-  const getToolColor = (status: string) => {
-    switch (status) {
-      case "running":
-        return "#6C5CE7";
-      case "completed":
-        return "#34C759";
-      case "failed":
-        return "#FF453A";
-      default:
-        return "#8E8E93";
-    }
-  };
+function getToolIcon(name: string): keyof typeof Ionicons.glyphMap {
+  const key = Object.keys(TOOL_ICON_MAP).find(k => name.toLowerCase().includes(k));
+  return key ? TOOL_ICON_MAP[key] : "settings-outline";
+}
 
-  const renderToolContent = (tool: Tool) => {
-    return (
-      <View style={styles.toolContent}>
-        {/* Input */}
-        {tool.input && (
-          <View style={styles.section}>
-            <Text style={styles.sectionTitle}>Input</Text>
-            <View style={styles.codeBlock}>
-              <Text style={styles.codeText}>
-                {JSON.stringify(tool.input, null, 2)}
-              </Text>
-            </View>
-          </View>
-        )}
+function getToolColor(name: string): string {
+  const key = Object.keys(TOOL_COLOR_MAP).find(k => name.toLowerCase().includes(k));
+  return key ? TOOL_COLOR_MAP[key] : "#8E8E93";
+}
 
-        {/* Output */}
-        {tool.output && (
-          <View style={styles.section}>
-            <Text style={styles.sectionTitle}>Output</Text>
-            <View style={styles.codeBlock}>
-              <Text style={styles.codeText}>
-                {typeof tool.output === "string"
-                  ? tool.output
-                  : JSON.stringify(tool.output, null, 2)}
-              </Text>
-            </View>
-          </View>
-        )}
+function getStatusColor(status: ToolItem["status"]): string {
+  switch (status) {
+    case "calling": return "#6C5CE7";
+    case "called": return "#30D158";
+    case "error": return "#FF453A";
+  }
+}
 
-        {/* Error */}
-        {tool.error && (
-          <View style={styles.section}>
-            <Text style={styles.sectionTitle}>Error</Text>
-            <View style={[styles.codeBlock, styles.errorBlock]}>
-              <Text style={styles.errorText}>{tool.error}</Text>
-            </View>
-          </View>
-        )}
+function getStatusLabel(status: ToolItem["status"]): string {
+  switch (status) {
+    case "calling": return "Memproses";
+    case "called": return "Selesai";
+    case "error": return "Error";
+  }
+}
 
-        {/* Status */}
-        {tool.status === "running" && (
-          <View style={styles.statusContainer}>
-            <ActivityIndicator color="#6C5CE7" size="small" />
-            <Text style={styles.statusText}>Running...</Text>
-          </View>
-        )}
-      </View>
-    );
-  };
+export function ToolPanel({
+  tools = [],
+  isVisible = true,
+  onToggleVisible,
+}: ToolPanelProps) {
+  const [selectedToolId, setSelectedToolId] = useState<string | null>(null);
 
-  if (!isExpanded) {
+  const selectedTool = tools.find(t => t.tool_call_id === selectedToolId) || null;
+
+  if (!isVisible) {
     return (
       <TouchableOpacity
         style={styles.collapsedContainer}
-        onPress={() => setIsExpanded(true)}
+        onPress={onToggleVisible}
+        activeOpacity={0.7}
       >
-        <Ionicons name="chevron-back" size={20} color="#8E8E93" />
+        <Ionicons name="chevron-back" size={16} color="#636366" />
       </TouchableOpacity>
     );
   }
@@ -119,21 +93,37 @@ export function ToolPanel({ sessionId, onResize }: ToolPanelProps) {
     <View style={styles.container}>
       {/* Header */}
       <View style={styles.header}>
-        <Text style={styles.headerTitle}>Tools</Text>
+        <View style={styles.headerLeft}>
+          <Ionicons name="terminal-outline" size={14} color="#6C5CE7" />
+          <Text style={styles.headerTitle}>Tools</Text>
+          {tools.length > 0 && (
+            <View style={styles.badge}>
+              <Text style={styles.badgeText}>{tools.length}</Text>
+            </View>
+          )}
+        </View>
         <TouchableOpacity
           style={styles.collapseButton}
-          onPress={() => setIsExpanded(false)}
+          onPress={onToggleVisible}
+          activeOpacity={0.7}
         >
-          <Ionicons name="chevron-forward" size={20} color="#8E8E93" />
+          <Ionicons name="chevron-forward" size={16} color="#636366" />
         </TouchableOpacity>
       </View>
 
       {/* Tools List */}
-      <ScrollView style={styles.toolsList} showsVerticalScrollIndicator={false}>
+      <ScrollView
+        style={styles.toolsList}
+        showsVerticalScrollIndicator={false}
+        contentContainerStyle={styles.toolsListContent}
+      >
         {tools.length === 0 ? (
           <View style={styles.emptyState}>
-            <Ionicons name="settings-outline" size={32} color="#636366" />
-            <Text style={styles.emptyStateText}>No tools executed yet</Text>
+            <Ionicons name="cube-outline" size={28} color="#2A2A32" />
+            <Text style={styles.emptyStateTitle}>Belum ada tools</Text>
+            <Text style={styles.emptyStateText}>
+              Tools digunakan saat agen menjalankan tugas
+            </Text>
           </View>
         ) : (
           tools.map((tool) => (
@@ -141,25 +131,33 @@ export function ToolPanel({ sessionId, onResize }: ToolPanelProps) {
               key={tool.tool_call_id}
               style={[
                 styles.toolItem,
-                selectedTool?.tool_call_id === tool.tool_call_id &&
-                  styles.toolItemSelected,
+                selectedToolId === tool.tool_call_id && styles.toolItemSelected,
               ]}
-              onPress={() => setSelectedTool(tool)}
+              onPress={() =>
+                setSelectedToolId(
+                  selectedToolId === tool.tool_call_id ? null : tool.tool_call_id
+                )
+              }
+              activeOpacity={0.7}
             >
-              <View style={styles.toolItemIcon}>
+              <View style={[styles.toolIcon, { backgroundColor: `${getToolColor(tool.name)}18` }]}>
                 <Ionicons
                   name={getToolIcon(tool.name)}
-                  size={16}
-                  color={getToolColor(tool.status)}
+                  size={14}
+                  color={getToolColor(tool.name)}
                 />
               </View>
-              <View style={styles.toolItemContent}>
-                <Text style={styles.toolItemName}>{tool.name}</Text>
-                <Text style={styles.toolItemStatus}>{tool.status}</Text>
+              <View style={styles.toolInfo}>
+                <Text style={styles.toolName} numberOfLines={1}>{tool.name}</Text>
+                <View style={styles.toolStatusRow}>
+                  {tool.status === "calling" && (
+                    <ActivityIndicator size="small" color="#6C5CE7" style={styles.spinner} />
+                  )}
+                  <Text style={[styles.toolStatus, { color: getStatusColor(tool.status) }]}>
+                    {getStatusLabel(tool.status)}
+                  </Text>
+                </View>
               </View>
-              {tool.status === "running" && (
-                <ActivityIndicator color="#6C5CE7" size="small" />
-              )}
             </TouchableOpacity>
           ))
         )}
@@ -167,9 +165,62 @@ export function ToolPanel({ sessionId, onResize }: ToolPanelProps) {
 
       {/* Tool Details */}
       {selectedTool && (
-        <ScrollView style={styles.detailsContainer}>
-          {renderToolContent(selectedTool)}
-        </ScrollView>
+        <View style={styles.detailContainer}>
+          <View style={styles.detailHeader}>
+            <Text style={styles.detailTitle}>{selectedTool.name}</Text>
+            <TouchableOpacity onPress={() => setSelectedToolId(null)}>
+              <Ionicons name="close" size={16} color="#636366" />
+            </TouchableOpacity>
+          </View>
+          <ScrollView style={styles.detailScroll} showsVerticalScrollIndicator={false}>
+            {selectedTool.input && (
+              <View style={styles.section}>
+                <Text style={styles.sectionLabel}>Input</Text>
+                <View style={styles.codeBlock}>
+                  <Text style={styles.codeText} selectable>
+                    {typeof selectedTool.input === "string"
+                      ? selectedTool.input
+                      : JSON.stringify(selectedTool.input, null, 2)}
+                  </Text>
+                </View>
+              </View>
+            )}
+
+            {selectedTool.output && (
+              <View style={styles.section}>
+                <Text style={styles.sectionLabel}>Output</Text>
+                <View style={styles.codeBlock}>
+                  <Text style={styles.codeText} selectable numberOfLines={20}>
+                    {selectedTool.output}
+                  </Text>
+                </View>
+              </View>
+            )}
+
+            {selectedTool.tool_content?.type === "browser" && selectedTool.tool_content.url && (
+              <View style={styles.section}>
+                <Text style={styles.sectionLabel}>URL</Text>
+                <Text style={styles.urlText}>{selectedTool.tool_content.url}</Text>
+              </View>
+            )}
+
+            {selectedTool.error && (
+              <View style={styles.section}>
+                <Text style={styles.sectionLabel}>Error</Text>
+                <View style={[styles.codeBlock, styles.errorBlock]}>
+                  <Text style={styles.errorText} selectable>{selectedTool.error}</Text>
+                </View>
+              </View>
+            )}
+
+            {selectedTool.status === "calling" && (
+              <View style={styles.runningRow}>
+                <ActivityIndicator color="#6C5CE7" size="small" />
+                <Text style={styles.runningText}>Sedang dieksekusi...</Text>
+              </View>
+            )}
+          </ScrollView>
+        </View>
       )}
     </View>
   );
@@ -178,16 +229,14 @@ export function ToolPanel({ sessionId, onResize }: ToolPanelProps) {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: "#1A1A20",
-    borderLeftWidth: 1,
-    borderLeftColor: "#2C2C30",
+    backgroundColor: "#0D0D12",
   },
   collapsedContainer: {
     flex: 1,
-    backgroundColor: "#1A1A20",
-    justifyContent: "flex-start",
     alignItems: "center",
-    paddingVertical: 12,
+    justifyContent: "flex-start",
+    paddingTop: 16,
+    backgroundColor: "#0D0D12",
   },
   header: {
     flexDirection: "row",
@@ -196,121 +245,180 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 12,
     borderBottomWidth: 1,
-    borderBottomColor: "#2C2C30",
+    borderBottomColor: "#1E1E26",
   },
-  headerTitle: {
-    fontSize: 14,
-    fontWeight: "600",
-    color: "#FFFFFF",
-  },
-  collapseButton: {
-    width: 32,
-    height: 32,
-    borderRadius: 6,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "#2C2C30",
-  },
-  toolsList: {
-    flex: 1,
-    paddingHorizontal: 8,
-    paddingVertical: 8,
-    maxHeight: "40%",
-  },
-  toolItem: {
+  headerLeft: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#2C2C30",
-    borderRadius: 8,
-    paddingHorizontal: 10,
-    paddingVertical: 10,
-    marginBottom: 8,
-    gap: 8,
+    gap: 6,
   },
-  toolItemSelected: {
-    backgroundColor: "#6C5CE7",
+  headerTitle: {
+    fontFamily: "Inter_600SemiBold",
+    fontSize: 13,
+    color: "#E8E8ED",
   },
-  toolItemIcon: {
+  badge: {
+    backgroundColor: "rgba(108,92,231,0.2)",
+    borderRadius: 10,
+    paddingHorizontal: 6,
+    paddingVertical: 1,
+  },
+  badgeText: {
+    fontFamily: "Inter_600SemiBold",
+    fontSize: 10,
+    color: "#6C5CE7",
+  },
+  collapseButton: {
     width: 28,
     height: 28,
     borderRadius: 6,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "#1A1A20",
+    backgroundColor: "#1A1A22",
   },
-  toolItemContent: {
+  toolsList: {
     flex: 1,
+    maxHeight: "55%",
   },
-  toolItemName: {
-    color: "#FFFFFF",
+  toolsListContent: {
+    padding: 8,
+    gap: 4,
+  },
+  toolItem: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "#131318",
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    gap: 8,
+    borderWidth: 1,
+    borderColor: "transparent",
+  },
+  toolItemSelected: {
+    borderColor: "rgba(108,92,231,0.3)",
+    backgroundColor: "rgba(108,92,231,0.07)",
+  },
+  toolIcon: {
+    width: 28,
+    height: 28,
+    borderRadius: 7,
+    alignItems: "center",
+    justifyContent: "center",
+    flexShrink: 0,
+  },
+  toolInfo: {
+    flex: 1,
+    gap: 2,
+  },
+  toolName: {
+    fontFamily: "Inter_500Medium",
     fontSize: 12,
-    fontWeight: "500",
+    color: "#E8E8ED",
   },
-  toolItemStatus: {
-    color: "#8E8E93",
+  toolStatusRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+  },
+  spinner: {
+    transform: [{ scale: 0.65 }],
+  },
+  toolStatus: {
+    fontFamily: "Inter_400Regular",
     fontSize: 11,
-    marginTop: 2,
   },
   emptyState: {
     alignItems: "center",
-    justifyContent: "center",
     paddingVertical: 32,
-    gap: 8,
+    gap: 6,
+    paddingHorizontal: 16,
+  },
+  emptyStateTitle: {
+    fontFamily: "Inter_500Medium",
+    fontSize: 13,
+    color: "#3A3A45",
+    marginTop: 4,
   },
   emptyStateText: {
-    color: "#636366",
-    fontSize: 12,
-    fontWeight: "500",
+    fontFamily: "Inter_400Regular",
+    fontSize: 11,
+    color: "#2A2A35",
+    textAlign: "center",
+    lineHeight: 16,
   },
-  detailsContainer: {
+  detailContainer: {
     flex: 1,
     borderTopWidth: 1,
-    borderTopColor: "#2C2C30",
-    paddingHorizontal: 12,
-    paddingVertical: 12,
+    borderTopColor: "#1E1E26",
   },
-  toolContent: {
-    gap: 12,
+  detailHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: "#1E1E26",
+  },
+  detailTitle: {
+    fontFamily: "Inter_600SemiBold",
+    fontSize: 12,
+    color: "#E8E8ED",
+  },
+  detailScroll: {
+    flex: 1,
+    padding: 10,
   },
   section: {
-    gap: 6,
+    marginBottom: 10,
+    gap: 4,
   },
-  sectionTitle: {
-    color: "#FFFFFF",
-    fontSize: 12,
-    fontWeight: "600",
+  sectionLabel: {
+    fontFamily: "Inter_600SemiBold",
+    fontSize: 10,
+    color: "#636366",
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
   },
   codeBlock: {
-    backgroundColor: "#0A0A0C",
+    backgroundColor: "#0A0A0F",
     borderRadius: 6,
-    paddingHorizontal: 10,
-    paddingVertical: 8,
+    padding: 8,
     borderWidth: 1,
-    borderColor: "#2C2C30",
+    borderColor: "#1E1E26",
   },
   codeText: {
-    color: "#8E8E93",
-    fontSize: 11,
-    fontFamily: "Courier New",
+    fontFamily: "monospace",
+    fontSize: 10,
+    color: "#8E8EA0",
+    lineHeight: 15,
   },
   errorBlock: {
-    borderColor: "#FF453A",
-    backgroundColor: "#FF453A10",
+    borderColor: "rgba(255,69,58,0.3)",
+    backgroundColor: "rgba(255,69,58,0.05)",
   },
   errorText: {
+    fontFamily: "monospace",
+    fontSize: 10,
     color: "#FF453A",
-    fontSize: 11,
-    fontFamily: "Courier New",
+    lineHeight: 15,
   },
-  statusContainer: {
+  urlText: {
+    fontFamily: "monospace",
+    fontSize: 11,
+    color: "#007AFF",
+    lineHeight: 16,
+  },
+  runningRow: {
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
     paddingVertical: 8,
   },
-  statusText: {
-    color: "#6C5CE7",
+  runningText: {
+    fontFamily: "Inter_400Regular",
     fontSize: 12,
-    fontWeight: "500",
+    color: "#6C5CE7",
   },
 });

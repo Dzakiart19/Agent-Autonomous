@@ -5,256 +5,367 @@ import {
   StyleSheet,
   FlatList,
   TouchableOpacity,
-  ActivityIndicator,
-  KeyboardAvoidingView,
   Platform,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
-import { ChatMessage } from "./ChatMessage";
+import { ChatMessageBubble } from "./ChatMessage";
 import { ChatBox } from "./ChatBox";
-import { PlanPanel } from "./PlanPanel";
-import { ToolPanel } from "./ToolPanel";
-import { apiService } from "@/lib/api-service";
+import { AgentThinking, AgentWorking } from "./AgentThinking";
+import { apiService, type AgentEvent } from "@/lib/api-service";
+import type { ChatMessage, ChatAttachment } from "@/lib/chat";
 
-interface Message {
-  id: string;
-  type: "user" | "assistant" | "tool" | "step" | "attachments";
-  content: any;
-  timestamp: Date;
-}
-
-interface Plan {
-  steps: Array<{
-    id: string;
-    description: string;
-    status: "pending" | "running" | "completed" | "failed";
-  }>;
+interface ToolItem {
+  tool_call_id: string;
+  name: string;
+  status: "calling" | "called" | "error";
+  input?: any;
+  output?: string;
+  error?: string;
+  tool_content?: any;
 }
 
 interface ChatPageProps {
   sessionId?: string;
   isLeftPanelShow: boolean;
   onToggleLeftPanel: () => void;
+  onToolsChange?: (tools: ToolItem[]) => void;
 }
+
+type ThinkingState = {
+  active: boolean;
+  label: string;
+  stepLabel?: string;
+};
 
 export function ChatPage({
   sessionId,
   isLeftPanelShow,
   onToggleLeftPanel,
+  onToolsChange,
 }: ChatPageProps) {
-  const [messages, setMessages] = useState<Message[]>([]);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [inputMessage, setInputMessage] = useState("");
   const [title, setTitle] = useState("New Chat");
-  const [plan, setPlan] = useState<Plan | undefined>();
-  const [attachments, setAttachments] = useState<any[]>([]);
+  const [attachments] = useState<ChatAttachment[]>([]);
   const [follow, setFollow] = useState(true);
-  const [shareMode, setShareMode] = useState<"private" | "public">("private");
-  const [linkCopied, setLinkCopied] = useState(false);
-  const [sharingLoading, setSharingLoading] = useState(false);
   const [isAgentMode, setIsAgentMode] = useState(true);
+  const [thinking, setThinking] = useState<ThinkingState>({ active: false, label: "" });
+  const [tools, setTools] = useState<ToolItem[]>([]);
+  const [streamingContent, setStreamingContent] = useState<string>("");
 
   const flatListRef = useRef<FlatList>(null);
-  const cancelChatRef = useRef<(() => void) | null>(null);
+  const cancelRef = useRef<(() => void) | null>(null);
+  const streamingMsgIdRef = useRef<string | null>(null);
+  const toolsRef = useRef<ToolItem[]>([]);
 
-  // Scroll to bottom when messages change
   useEffect(() => {
-    if (follow && messages.length > 0) {
+    toolsRef.current = tools;
+    onToolsChange?.(tools);
+  }, [tools, onToolsChange]);
+
+  useEffect(() => {
+    if (follow && (messages.length > 0 || thinking.active)) {
       setTimeout(() => {
         flatListRef.current?.scrollToEnd({ animated: true });
-      }, 100);
+      }, 80);
     }
-  }, [messages, follow]);
+  }, [messages, thinking, follow, streamingContent]);
 
-  // Handle submit message
+  const handleEvent = useCallback((event: AgentEvent) => {
+    const type = event.type;
+
+    if (type === "session") {
+      return;
+    }
+
+    if (type === "plan") {
+      setThinking({ active: true, label: "Membuat rencana...", stepLabel: event.plan?.title });
+      return;
+    }
+
+    if (type === "step") {
+      const step = event.step;
+      const status = event.status;
+      if (status === "running" && step?.description) {
+        setThinking({ active: true, label: step.description, stepLabel: step.description });
+      } else if (status === "completed" || status === "failed") {
+        setThinking({ active: true, label: "Menyelesaikan langkah..." });
+      }
+      return;
+    }
+
+    if (type === "tool") {
+      const toolName = event.tool_name || event.function_name || "tool";
+      const callId = event.tool_call_id || `tool_${Date.now()}`;
+      const status = event.status as "calling" | "called" | "error";
+
+      const toolLabels: Record<string, string> = {
+        browser: "Membuka browser",
+        shell: "Menjalankan perintah",
+        file: "Membaca file",
+        search: "Mencari informasi",
+        mcp: "Memanggil MCP",
+      };
+      const thinkLabel = toolLabels[toolName] || `Menggunakan ${toolName}`;
+
+      if (status === "calling") {
+        setThinking({ active: true, label: thinkLabel });
+        setTools(prev => {
+          const idx = prev.findIndex(t => t.tool_call_id === callId);
+          if (idx >= 0) {
+            const updated = [...prev];
+            updated[idx] = { ...updated[idx], status: "calling" };
+            return updated;
+          }
+          return [...prev, {
+            tool_call_id: callId,
+            name: toolName,
+            status: "calling",
+            input: event.function_args,
+          }];
+        });
+      } else if (status === "called") {
+        setTools(prev => {
+          const idx = prev.findIndex(t => t.tool_call_id === callId);
+          if (idx >= 0) {
+            const updated = [...prev];
+            updated[idx] = {
+              ...updated[idx],
+              status: "called",
+              output: event.function_result,
+              tool_content: event.tool_content,
+            };
+            return updated;
+          }
+          return prev;
+        });
+      } else if (status === "error") {
+        setTools(prev => {
+          const idx = prev.findIndex(t => t.tool_call_id === callId);
+          if (idx >= 0) {
+            const updated = [...prev];
+            updated[idx] = { ...updated[idx], status: "error", error: event.function_result };
+            return updated;
+          }
+          return prev;
+        });
+      }
+      return;
+    }
+
+    if (type === "message_start") {
+      const newId = `msg_${Date.now()}_stream`;
+      streamingMsgIdRef.current = newId;
+      setStreamingContent("");
+      setThinking({ active: false, label: "" });
+      const msg: ChatMessage = {
+        id: newId,
+        role: "assistant",
+        content: "",
+        timestamp: Date.now(),
+        isStreaming: true,
+      };
+      setMessages(prev => [...prev, msg]);
+      return;
+    }
+
+    if (type === "message_chunk") {
+      const chunk = event.chunk || event.content || "";
+      if (chunk && streamingMsgIdRef.current) {
+        setStreamingContent(prev => prev + chunk);
+        setMessages(prev => prev.map(m =>
+          m.id === streamingMsgIdRef.current
+            ? { ...m, content: m.content + chunk }
+            : m
+        ));
+      }
+      return;
+    }
+
+    if (type === "message_end") {
+      if (streamingMsgIdRef.current) {
+        setMessages(prev => prev.map(m =>
+          m.id === streamingMsgIdRef.current
+            ? { ...m, isStreaming: false }
+            : m
+        ));
+        streamingMsgIdRef.current = null;
+        setStreamingContent("");
+      }
+      return;
+    }
+
+    if (type === "message") {
+      const content = event.content || event.message || "";
+      if (!content) return;
+      setThinking({ active: false, label: "" });
+      const msg: ChatMessage = {
+        id: `msg_${Date.now()}`,
+        role: "assistant",
+        content,
+        timestamp: Date.now(),
+      };
+      setMessages(prev => [...prev, msg]);
+      return;
+    }
+
+    if (type === "title" && event.title) {
+      setTitle(event.title);
+      return;
+    }
+
+    if (type === "thinking" && event.thinking) {
+      setThinking({ active: true, label: event.thinking });
+      return;
+    }
+
+    if (type === "error") {
+      setThinking({ active: false, label: "" });
+      const errMsg: ChatMessage = {
+        id: `msg_${Date.now()}_err`,
+        role: "assistant",
+        content: "",
+        timestamp: Date.now(),
+        error: event.error || "Terjadi kesalahan",
+      };
+      setMessages(prev => [...prev, errMsg]);
+      return;
+    }
+  }, []);
+
   const handleSubmit = useCallback(async () => {
-    if (!inputMessage.trim()) return;
+    if (!inputMessage.trim() || isLoading) return;
 
-    const userMessage: Message = {
+    const userMsg: ChatMessage = {
       id: `msg_${Date.now()}`,
-      type: "user",
-      content: {
-        content: inputMessage,
-        timestamp: new Date().toISOString(),
-      },
-      timestamp: new Date(),
+      role: "user",
+      content: inputMessage.trim(),
+      timestamp: Date.now(),
+      attachments: attachments.length > 0 ? attachments : undefined,
     };
 
-    setMessages((prev) => [...prev, userMessage]);
+    setMessages(prev => [...prev, userMsg]);
+    const msgText = inputMessage.trim();
     setInputMessage("");
     setIsLoading(true);
+    setTools([]);
+    setThinking({ active: true, label: isAgentMode ? "Dzeck sedang berpikir..." : "Memikirkan jawaban..." });
 
     try {
       if (isAgentMode) {
-        // Use agent mode with SSE
-        await apiService.agent(
+        const historyMsgs = messages.map(m => ({
+          role: m.role,
+          content: m.content,
+        }));
+
+        const cancel = await apiService.agent(
           {
-            message: inputMessage,
-            messages: messages.map((m) => ({
-              role: m.type === "user" ? "user" : "assistant",
-              content:
-                typeof m.content === "string"
-                  ? m.content
-                  : m.content.content,
-            })),
+            message: msgText,
+            messages: historyMsgs,
             model: "@cf/meta/llama-3.1-70b-instruct",
-            attachments: attachments,
+            attachments: [],
           },
           {
-            onMessage: (data) => {
-              if (data.type === "message") {
-                const assistantMessage: Message = {
-                  id: `msg_${Date.now()}`,
-                  type: "assistant",
-                  content: {
-                    content: data.content,
-                    timestamp: new Date().toISOString(),
-                  },
-                  timestamp: new Date(),
-                };
-                setMessages((prev) => [...prev, assistantMessage]);
-              } else if (data.type === "tool") {
-                const toolMessage: Message = {
-                  id: `msg_${Date.now()}`,
-                  type: "tool",
-                  content: data,
-                  timestamp: new Date(),
-                };
-                setMessages((prev) => [...prev, toolMessage]);
-              } else if (data.type === "step") {
-                const stepMessage: Message = {
-                  id: `msg_${Date.now()}`,
-                  type: "step",
-                  content: data,
-                  timestamp: new Date(),
-                };
-                setMessages((prev) => [...prev, stepMessage]);
-              } else if (data.type === "title") {
-                setTitle(data.title);
-              } else if (data.type === "plan") {
-                setPlan(data);
-              }
-            },
-            onError: (error) => {
-              console.error("Agent error:", error);
-              const errorMessage: Message = {
-                id: `msg_${Date.now()}`,
-                type: "assistant",
-                content: {
-                  content: `Error: ${error}`,
-                  timestamp: new Date().toISOString(),
-                },
-                timestamp: new Date(),
-              };
-              setMessages((prev) => [...prev, errorMessage]);
+            onMessage: handleEvent,
+            onError: (err) => {
+              console.error("Agent error:", err);
+              setThinking({ active: false, label: "" });
+              setMessages(prev => [...prev, {
+                id: `msg_${Date.now()}_err`,
+                role: "assistant",
+                content: "",
+                timestamp: Date.now(),
+                error: err.message,
+              }]);
+              setIsLoading(false);
             },
             onDone: () => {
+              setThinking({ active: false, label: "" });
               setIsLoading(false);
+              cancelRef.current = null;
             },
           }
         );
-      } else {
-        // Use regular chat mode
-        const response = await apiService.chat({
-          messages: messages.map((m) => ({
-            role: m.type === "user" ? "user" : "assistant",
-            content:
-              typeof m.content === "string" ? m.content : m.content.content,
-          })),
-        });
 
-        const assistantMessage: Message = {
+        cancelRef.current = cancel;
+      } else {
+        const historyMsgs = messages.map(m => ({
+          role: m.role,
+          content: m.content,
+        }));
+        historyMsgs.push({ role: "user", content: msgText });
+
+        const response = await apiService.chat({ messages: historyMsgs });
+        setThinking({ active: false, label: "" });
+
+        const replyContent = response.content || "Tidak ada balasan";
+        const assistantMsg: ChatMessage = {
           id: `msg_${Date.now()}`,
-          type: "assistant",
-          content: {
-            content: response.content,
-            timestamp: response.timestamp,
-          },
-          timestamp: new Date(),
+          role: "assistant",
+          content: replyContent,
+          timestamp: Date.now(),
         };
-        setMessages((prev) => [...prev, assistantMessage]);
+        setMessages(prev => [...prev, assistantMsg]);
         setIsLoading(false);
       }
-    } catch (error) {
-      console.error("Chat error:", error);
-      const errorMessage: Message = {
-        id: `msg_${Date.now()}`,
-        type: "assistant",
-        content: {
-          content: `Error: ${error}`,
-          timestamp: new Date().toISOString(),
-        },
-        timestamp: new Date(),
-      };
-      setMessages((prev) => [...prev, errorMessage]);
+    } catch (err: any) {
+      console.error("Submit error:", err);
+      setThinking({ active: false, label: "" });
+      setMessages(prev => [...prev, {
+        id: `msg_${Date.now()}_err`,
+        role: "assistant",
+        content: "",
+        timestamp: Date.now(),
+        error: err?.message || "Gagal mengirim pesan",
+      }]);
       setIsLoading(false);
     }
-  }, [inputMessage, messages, isAgentMode, attachments]);
+  }, [inputMessage, messages, isAgentMode, attachments, isLoading, handleEvent]);
 
   const handleStop = useCallback(() => {
-    if (cancelChatRef.current) {
-      cancelChatRef.current();
-      cancelChatRef.current = null;
+    if (cancelRef.current) {
+      cancelRef.current();
+      cancelRef.current = null;
     }
+    setThinking({ active: false, label: "" });
     setIsLoading(false);
   }, []);
 
-  const handleShareModeChange = useCallback(
-    async (mode: "private" | "public") => {
-      setSharingLoading(true);
-      try {
-        setShareMode(mode);
-        // API call to update share mode
-      } catch (error) {
-        console.error("Failed to change share mode:", error);
-      } finally {
-        setSharingLoading(false);
-      }
-    },
-    []
-  );
-
-  const handleCopyLink = useCallback(async () => {
-    try {
-      // Copy link to clipboard
-      setLinkCopied(true);
-      setTimeout(() => setLinkCopied(false), 2000);
-    } catch (error) {
-      console.error("Failed to copy link:", error);
-    }
-  }, []);
-
-  const renderMessage = useCallback(
-    ({ item }: { item: Message }) => (
-      <ChatMessage
-        message={item}
-        onToolClick={(toolName) => {
-          console.log("Tool clicked:", toolName);
-        }}
-      />
-    ),
-    []
-  );
+  const renderMessage = useCallback(({ item }: { item: ChatMessage }) => (
+    <ChatMessageBubble message={item} />
+  ), []);
 
   const renderEmpty = () => (
     <View style={styles.emptyContainer}>
-      <Ionicons name="sparkles" size={48} color="#6C5CE7" />
-      <Text style={styles.emptyTitle}>Welcome to Dzeck AI</Text>
+      <View style={styles.emptyIconContainer}>
+        <Ionicons name="sparkles" size={36} color="#6C5CE7" />
+      </View>
+      <Text style={styles.emptyTitle}>Dzeck AI</Text>
       <Text style={styles.emptySubtitle}>
         {isAgentMode
-          ? "Tell me what you want to accomplish"
-          : "Ask me anything"}
+          ? "Mode Agen aktif — saya bisa browsing, menulis kode, dan lebih banyak lagi"
+          : "Mode Chat — tanyakan apapun"}
       </Text>
     </View>
   );
 
+  const renderListFooter = () => {
+    if (!thinking.active && !isLoading) return null;
+    return (
+      <View style={styles.thinkingRow}>
+        <View style={styles.thinkingAvatar}>
+          <Ionicons name="sparkles" size={12} color="#FFFFFF" />
+        </View>
+        <View style={styles.thinkingBubble}>
+          <AgentWorking label={thinking.label || "Memproses..."} />
+        </View>
+      </View>
+    );
+  };
+
   return (
-    <KeyboardAvoidingView
-      behavior={Platform.OS === "ios" ? "padding" : "height"}
-      style={styles.container}
-      keyboardVerticalOffset={Platform.OS === "ios" ? 0 : 20}
-    >
-      {/* Header */}
+    <View style={styles.container}>
       <View style={styles.header}>
         <View style={styles.headerLeft}>
           {!isLeftPanelShow && (
@@ -272,55 +383,42 @@ export function ChatPage({
 
         <View style={styles.headerRight}>
           <TouchableOpacity
-            style={styles.modeButton}
+            style={[styles.modeButton, isAgentMode && styles.modeButtonActive]}
             onPress={() => setIsAgentMode(!isAgentMode)}
           >
             <Ionicons
-              name={isAgentMode ? "flash" : "git-branch-outline"}
-              size={18}
+              name={isAgentMode ? "flash" : "chatbubble-ellipses-outline"}
+              size={16}
               color={isAgentMode ? "#6C5CE7" : "#8E8E93"}
             />
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.shareButton}>
-            <Ionicons name="share-social-outline" size={18} color="#8E8E93" />
+            <Text style={[styles.modeButtonText, isAgentMode && styles.modeButtonTextActive]}>
+              {isAgentMode ? "Agen" : "Chat"}
+            </Text>
           </TouchableOpacity>
         </View>
       </View>
 
-      {/* Messages */}
       <FlatList
         ref={flatListRef}
         data={messages}
         renderItem={renderMessage}
         keyExtractor={(item) => item.id}
         ListEmptyComponent={renderEmpty}
-        contentContainerStyle={styles.messageList}
+        ListFooterComponent={renderListFooter}
+        contentContainerStyle={[
+          styles.messageList,
+          messages.length === 0 && styles.messageListEmpty,
+        ]}
         scrollEnabled={true}
         showsVerticalScrollIndicator={false}
         onScroll={(event) => {
-          const offsetY = event.nativeEvent.contentOffset.y;
-          const contentHeight = event.nativeEvent.contentSize.height;
-          const layoutHeight = event.nativeEvent.layoutMeasurement.height;
-          const isAtBottom =
-            contentHeight - layoutHeight - offsetY < 100;
+          const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
+          const isAtBottom = contentSize.height - layoutMeasurement.height - contentOffset.y < 120;
           setFollow(isAtBottom);
         }}
+        scrollEventThrottle={100}
       />
 
-      {/* Plan Panel */}
-      {plan && plan.steps.length > 0 && <PlanPanel plan={plan} />}
-
-      {/* Loading Indicator */}
-      {isLoading && (
-        <View style={styles.loadingContainer}>
-          <ActivityIndicator size="small" color="#6C5CE7" />
-          <Text style={styles.loadingText}>
-            {isAgentMode ? "Agent is working..." : "Thinking..."}
-          </Text>
-        </View>
-      )}
-
-      {/* Input */}
       <ChatBox
         value={inputMessage}
         onChangeText={setInputMessage}
@@ -330,7 +428,7 @@ export function ChatPage({
         isAgentMode={isAgentMode}
         attachments={attachments}
       />
-    </KeyboardAvoidingView>
+    </View>
   );
 }
 
@@ -344,9 +442,10 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "space-between",
     paddingHorizontal: 16,
-    paddingVertical: 12,
+    paddingVertical: 10,
     borderBottomWidth: 1,
-    borderBottomColor: "#2C2C30",
+    borderBottomColor: "#1E1E26",
+    backgroundColor: "#0D0D12",
   },
   headerLeft: {
     flex: 1,
@@ -355,16 +454,16 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   toggleButton: {
-    width: 36,
-    height: 36,
+    width: 34,
+    height: 34,
     borderRadius: 8,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "#1A1A20",
+    backgroundColor: "#1A1A22",
   },
   title: {
-    fontSize: 16,
-    fontWeight: "600",
+    fontSize: 15,
+    fontFamily: "Inter_600SemiBold",
     color: "#FFFFFF",
     flex: 1,
   },
@@ -374,53 +473,90 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   modeButton: {
-    width: 36,
-    height: 36,
-    borderRadius: 8,
+    flexDirection: "row",
     alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "#1A1A20",
+    gap: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+    backgroundColor: "#1A1A22",
     borderWidth: 1,
-    borderColor: "#2C2C30",
+    borderColor: "#2C2C35",
   },
-  shareButton: {
-    width: 36,
-    height: 36,
-    borderRadius: 8,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "#1A1A20",
-    borderWidth: 1,
-    borderColor: "#2C2C30",
+  modeButtonActive: {
+    borderColor: "rgba(108,92,231,0.5)",
+    backgroundColor: "rgba(108,92,231,0.12)",
+  },
+  modeButtonText: {
+    fontFamily: "Inter_500Medium",
+    fontSize: 12,
+    color: "#8E8E93",
+  },
+  modeButtonTextActive: {
+    color: "#6C5CE7",
   },
   messageList: {
+    paddingVertical: 12,
+    paddingBottom: 8,
+  },
+  messageListEmpty: {
     flexGrow: 1,
-    paddingVertical: 16,
   },
   emptyContainer: {
     flex: 1,
     alignItems: "center",
     justifyContent: "center",
+    paddingHorizontal: 32,
     gap: 12,
+    paddingTop: 80,
+  },
+  emptyIconContainer: {
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    backgroundColor: "rgba(108,92,231,0.15)",
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 1,
+    borderColor: "rgba(108,92,231,0.2)",
   },
   emptyTitle: {
-    fontSize: 18,
-    fontWeight: "600",
+    fontFamily: "Inter_700Bold",
+    fontSize: 22,
     color: "#FFFFFF",
+    letterSpacing: -0.5,
   },
   emptySubtitle: {
+    fontFamily: "Inter_400Regular",
     fontSize: 14,
-    color: "#8E8E93",
+    color: "#636366",
+    textAlign: "center",
+    lineHeight: 20,
   },
-  loadingContainer: {
+  thinkingRow: {
     flexDirection: "row",
-    alignItems: "center",
+    alignItems: "flex-start",
     paddingHorizontal: 16,
-    paddingVertical: 12,
+    paddingVertical: 8,
     gap: 8,
   },
-  loadingText: {
-    color: "#8E8E93",
-    fontSize: 14,
+  thinkingAvatar: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: "#6C5CE7",
+    alignItems: "center",
+    justifyContent: "center",
+    flexShrink: 0,
+    marginTop: 2,
+  },
+  thinkingBubble: {
+    flex: 1,
+    backgroundColor: "rgba(108,92,231,0.07)",
+    borderRadius: 14,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderWidth: 1,
+    borderColor: "rgba(108,92,231,0.15)",
   },
 });

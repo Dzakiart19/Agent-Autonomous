@@ -1,8 +1,3 @@
-/**
- * API Service untuk komunikasi dengan backend
- * Implementasi non-streaming untuk respon yang lengkap
- */
-
 export interface ChatMessage {
   role: "user" | "assistant";
   content: string;
@@ -19,11 +14,39 @@ export interface ChatResponse {
 export interface AgentEvent {
   type: string;
   content?: string;
+  chunk?: string;
   session_id?: string;
   tool_name?: string;
-  tool_args?: Record<string, any>;
+  function_name?: string;
+  function_args?: Record<string, any>;
+  function_result?: string;
+  tool_content?: Record<string, any>;
+  tool_call_id?: string;
   timestamp?: string;
   error?: string;
+  plan?: any;
+  step?: any;
+  status?: string;
+  thinking?: string;
+  title?: string;
+  role?: string;
+  message?: string;
+  success?: boolean;
+  vnc_ws_port?: number;
+}
+
+export interface AgentRequest {
+  message: string;
+  messages?: Array<{ role: "user" | "assistant"; content: string }>;
+  model?: string;
+  attachments?: any[];
+  session_id?: string;
+}
+
+export interface AgentCallbacks {
+  onMessage?: (event: AgentEvent) => void;
+  onError?: (error: Error) => void;
+  onDone?: () => void;
 }
 
 class ApiService {
@@ -33,12 +56,9 @@ class ApiService {
     this.baseUrl = baseUrl || (typeof window !== "undefined" ? window.location.origin : "");
   }
 
-  /**
-   * Non-streaming chat endpoint
-   * Mengirim pesan dan menerima respon lengkap (bukan streaming)
-   */
-  async chat(messages: ChatMessage[]): Promise<ChatResponse> {
+  async chat(payload: ChatMessage[] | { messages: ChatMessage[] }): Promise<ChatResponse> {
     try {
+      const messages = Array.isArray(payload) ? payload : payload.messages;
       const response = await fetch(`${this.baseUrl}/api/chat`, {
         method: "POST",
         headers: {
@@ -59,16 +79,14 @@ class ApiService {
     }
   }
 
-  /**
-   * Agent endpoint dengan SSE untuk streaming events
-   * Namun setiap event adalah complete message (non-streaming per message)
-   */
   async agent(
-    message: string,
-    onEvent: (event: AgentEvent) => void,
-    onError: (error: Error) => void,
-    onComplete: () => void
+    request: AgentRequest,
+    callbacks: AgentCallbacks = {}
   ): Promise<() => void> {
+    const { onMessage, onError, onDone } = callbacks;
+    let isClosed = false;
+    let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+
     try {
       const response = await fetch(`${this.baseUrl}/api/agent`, {
         method: "POST",
@@ -76,10 +94,11 @@ class ApiService {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          message,
-          messages: [],
-          model: "@cf/meta/llama-3.1-70b-instruct",
-          attachments: [],
+          message: request.message,
+          messages: request.messages || [],
+          model: request.model || "@cf/meta/llama-3.1-70b-instruct",
+          attachments: request.attachments || [],
+          session_id: request.session_id,
         }),
       });
 
@@ -87,23 +106,22 @@ class ApiService {
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       }
 
-      const reader = response.body?.getReader();
+      reader = response.body?.getReader() || null;
       if (!reader) {
         throw new Error("Response body is not readable");
       }
 
       const decoder = new TextDecoder();
       let buffer = "";
-      let isClosed = false;
 
       const processStream = async () => {
         try {
           while (!isClosed) {
-            const { done, value } = await reader.read();
+            const { done, value } = await reader!.read();
 
             if (done) {
               isClosed = true;
-              onComplete();
+              if (!isClosed) onDone?.();
               break;
             }
 
@@ -118,42 +136,39 @@ class ApiService {
               const data = trimmed.slice(6);
               if (data === "[DONE]") {
                 isClosed = true;
-                onComplete();
+                onDone?.();
                 return;
               }
 
               try {
-                const event = JSON.parse(data);
-                onEvent(event);
+                const event: AgentEvent = JSON.parse(data);
+                onMessage?.(event);
               } catch (e) {
-                console.error("Failed to parse event:", e);
+                console.error("Failed to parse SSE event:", e);
               }
             }
           }
         } catch (error) {
           if (!isClosed) {
             isClosed = true;
-            onError(error instanceof Error ? error : new Error(String(error)));
+            onError?.(error instanceof Error ? error : new Error(String(error)));
           }
         }
       };
 
       processStream();
 
-      // Return cancel function
       return () => {
         isClosed = true;
-        reader.cancel();
+        reader?.cancel().catch(() => {});
       };
     } catch (error) {
       console.error("Agent API error:", error);
-      throw error;
+      onError?.(error instanceof Error ? error : new Error(String(error)));
+      return () => { isClosed = true; };
     }
   }
 
-  /**
-   * Test endpoint untuk verifikasi API
-   */
   async test(): Promise<any> {
     try {
       const response = await fetch(`${this.baseUrl}/api/test`);
@@ -164,6 +179,17 @@ class ApiService {
     } catch (error) {
       console.error("Test API error:", error);
       throw error;
+    }
+  }
+
+  async getSessions(): Promise<any[]> {
+    try {
+      const response = await fetch(`${this.baseUrl}/api/sessions`);
+      if (!response.ok) return [];
+      const data = await response.json();
+      return data.sessions || [];
+    } catch {
+      return [];
     }
   }
 }
