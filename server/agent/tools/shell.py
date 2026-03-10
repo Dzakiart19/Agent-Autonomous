@@ -1,17 +1,12 @@
 """
 Shell execution tools for Dzeck AI Agent.
-Upgraded to class-based architecture from Ai-DzeckV2 (Manus) pattern.
-Provides: ShellTool class + backward-compatible functions.
+Uses E2B cloud sandbox for isolated, secure command execution.
+Falls back to local subprocess if E2B is unavailable.
 
-Design:
-- shell_exec: runs command synchronously, stores result in session dict
-- shell_view: shows last result of a session (success if session not found: already done)
-- shell_wait: sleeps N seconds then views session (success even if session not found)
-- shell_write_to_process: sends stdin to a running Popen process
-- shell_kill_process: terminates a session/process (success even if already gone)
+Provides: ShellTool class + backward-compatible functions.
 """
-import subprocess
 import os
+import subprocess
 import time
 import threading
 from typing import Optional, Dict, Any
@@ -19,9 +14,8 @@ from typing import Optional, Dict, Any
 from server.agent.models.tool_result import ToolResult
 from server.agent.tools.base import BaseTool, tool
 
+E2B_ENABLED = bool(os.environ.get("E2B_API_KEY", ""))
 
-# ─── Session store (module-level singleton, thread-safe) ─────────────────────
-# Maps session_id → {process, output, command, return_code, popen, lock}
 _shell_sessions: Dict[str, Dict[str, Any]] = {}
 _sessions_lock = threading.Lock()
 
@@ -44,82 +38,150 @@ def _get_session(sid: str) -> Optional[Dict[str, Any]]:
         return _shell_sessions.get(sid)
 
 
-# ─── Backward-compatible functions ───────────────────────────────────────────
+def _run_e2b(command: str, exec_dir: str = "/home/user", timeout: int = 90) -> Dict[str, Any]:
+    """Execute command via E2B cloud sandbox."""
+    try:
+        from server.agent.tools.e2b_sandbox import run_command
+        return run_command(command, workdir=exec_dir, timeout=timeout)
+    except Exception as e:
+        return {"success": False, "stdout": "", "stderr": str(e), "exit_code": -1}
 
-def shell_exec(command: str, exec_dir: str = "/tmp", id: str = "default") -> ToolResult:
-    """Execute a shell command in a named session. Stores result for shell_view."""
+
+def _run_local(command: str, exec_dir: str = "/tmp", timeout: int = 90) -> Dict[str, Any]:
+    """Execute command locally via subprocess (fallback)."""
     try:
         if not os.path.isdir(exec_dir):
             exec_dir = "/tmp"
-
-        popen = subprocess.Popen(
+        proc = subprocess.run(
             command,
             shell=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            stdin=subprocess.PIPE,
             text=True,
             cwd=exec_dir,
+            timeout=timeout,
             env={**os.environ, "PYTHONUNBUFFERED": "1", "TERM": "xterm-256color"},
         )
-
-        sess = _get_or_create_session(id)
-        sess["popen"] = popen
-        sess["command"] = command
-
-        try:
-            stdout, stderr = popen.communicate(timeout=90)
-        except subprocess.TimeoutExpired:
-            popen.kill()
-            stdout, stderr = popen.communicate()
-            return ToolResult(
-                success=False,
-                message="Command timed out after 90 seconds.\nstdout:\n{}\nstderr:\n{}".format(
-                    stdout[:2000], stderr[:500]),
-                data={"error": "timeout", "command": command, "id": id,
-                      "stdout": stdout[:2000], "stderr": stderr[:500]},
-            )
-
-        max_chars = 8000
-        if len(stdout) > max_chars:
-            stdout = stdout[:max_chars] + "\n[Output truncated...]"
-        if len(stderr) > max_chars:
-            stderr = stderr[:max_chars] + "\n[Error output truncated...]"
-
-        combined = ""
-        if stdout.strip():
-            combined += "stdout:\n{}".format(stdout)
-        if stderr.strip():
-            combined += "\nstderr:\n{}".format(stderr)
-        combined += "\nreturn_code: {}".format(popen.returncode)
-
-        sess["output"] = combined
-        sess["return_code"] = popen.returncode
-        sess["popen"] = None
-
-        return ToolResult(
-            success=popen.returncode == 0,
-            message=combined,
-            data={
-                "stdout": stdout,
-                "stderr": stderr,
-                "return_code": popen.returncode,
-                "command": command,
-                "id": id,
-            },
-        )
+        return {
+            "success": proc.returncode == 0,
+            "stdout": proc.stdout or "",
+            "stderr": proc.stderr or "",
+            "exit_code": proc.returncode,
+        }
+    except subprocess.TimeoutExpired:
+        return {"success": False, "stdout": "", "stderr": "Command timed out", "exit_code": -1}
     except Exception as e:
+        return {"success": False, "stdout": "", "stderr": str(e), "exit_code": -1}
+
+
+# Commands that require a graphical display (not available in cloud sandbox)
+# These would hang forever if allowed to run — intercept and provide helpful error
+_GUI_COMMANDS = [
+    "google-chrome", "google-chrome-stable", "chromium", "chromium-browser",
+    "firefox", "firefox-esr", "epiphany", "midori", "opera", "brave-browser",
+    "xdg-open", "xdg-launch", "xdg-email", "xdg-settings",
+    "gnome-open", "kde-open", "gvfs-open",
+    "xterm", "gnome-terminal", "konsole", "xfce4-terminal",
+    "x-www-browser", "sensible-browser",
+    "display", "eog", "feh", "sxiv",        # image viewers
+    "vlc", "mpv", "mplayer", "totem",       # media players
+    "evince", "okular", "zathura",           # document viewers
+    "gedit", "mousepad", "kate", "kwrite",  # GUI text editors
+    "gimp", "inkscape", "blender",           # GUI tools
+    "startx", "xinit", "Xorg", "Xvfb",
+]
+
+def _is_gui_command(command: str) -> Optional[str]:
+    """
+    Check if the command is a GUI/display-dependent program that cannot run
+    in a headless cloud sandbox. Returns the detected command name if GUI, else None.
+    """
+    import shlex
+    try:
+        parts = shlex.split(command.strip())
+    except Exception:
+        parts = command.strip().split()
+    if not parts:
+        return None
+    # Check base command name (without path)
+    base = os.path.basename(parts[0]).lower()
+    for gui_cmd in _GUI_COMMANDS:
+        if base == gui_cmd or base.startswith(gui_cmd + " "):
+            return base
+    # Also intercept "env VAR=val google-chrome ..." patterns
+    for part in parts:
+        base_part = os.path.basename(part).lower()
+        for gui_cmd in _GUI_COMMANDS:
+            if base_part == gui_cmd:
+                return base_part
+    return None
+
+
+def shell_exec(command: str, exec_dir: str = "/home/user", id: str = "default") -> ToolResult:
+    """Execute a shell command. Uses E2B cloud sandbox when available, else local."""
+
+    # Intercept GUI commands early — they would hang forever in a headless environment
+    gui_detected = _is_gui_command(command)
+    if gui_detected:
+        msg = (
+            f"[Shell] Command '{gui_detected}' requires a graphical display (GUI) which is "
+            f"not available in the cloud sandbox.\n\n"
+            f"For web browsing, use the 'web_browse' tool instead of launching a browser via shell.\n"
+            f"Example: web_browse(url='https://www.google.com') to navigate to Google.\n\n"
+            f"For opening files, use 'file_read' tool to read file contents directly.\n"
+            f"For images/screenshots, use the browser tool's built-in screenshot capability."
+        )
         return ToolResult(
             success=False,
-            message="Shell execution failed: {}".format(str(e)),
-            data={"error": str(e), "command": command, "id": id},
+            message=msg,
+            data={"stdout": "", "stderr": msg, "return_code": 1, "command": command,
+                  "id": id, "error": "gui_not_available"},
         )
+
+    if E2B_ENABLED:
+        res = _run_e2b(command, exec_dir=exec_dir)
+    else:
+        res = _run_local(command, exec_dir=exec_dir)
+
+    stdout = res.get("stdout", "")
+    stderr = res.get("stderr", "")
+    exit_code = res.get("exit_code", -1)
+
+    max_chars = 8000
+    if len(stdout) > max_chars:
+        stdout = stdout[:max_chars] + "\n[Output truncated...]"
+    if len(stderr) > max_chars:
+        stderr = stderr[:max_chars] + "\n[Error output truncated...]"
+
+    combined = ""
+    if stdout.strip():
+        combined += "stdout:\n{}".format(stdout)
+    if stderr.strip():
+        combined += "\nstderr:\n{}".format(stderr)
+    combined += "\nreturn_code: {}".format(exit_code)
+
+    sess = _get_or_create_session(id)
+    sess["output"] = combined
+    sess["return_code"] = exit_code
+    sess["command"] = command
+
+    backend = "E2B" if E2B_ENABLED else "local"
+    return ToolResult(
+        success=res.get("success", False),
+        message=combined,
+        data={
+            "stdout": stdout,
+            "stderr": stderr,
+            "return_code": exit_code,
+            "command": command,
+            "id": id,
+            "backend": backend,
+        },
+    )
 
 
 def shell_view(id: str = "default") -> ToolResult:
-    """View the current output/status of a shell session.
-    Returns success=True even if session not found (already completed or not started).
-    """
+    """View the current output/status of a shell session."""
     session = _get_session(id)
     if not session:
         available = []
@@ -131,21 +193,12 @@ def shell_view(id: str = "default") -> ToolResult:
                 id, available or ["(tidak ada)"]),
             data={"id": id, "found": False, "available_sessions": available},
         )
-
-    popen = session.get("popen")
-    if popen and popen.poll() is None:
-        status = "running"
-    else:
-        status = "completed"
-
     output = session.get("output", "(belum ada output)")
     return ToolResult(
         success=True,
-        message="Session '{}' [{}] (perintah: {})\n\n{}".format(
-            id, status, session.get("command", ""), output),
+        message="Session '{}' (perintah: {})\n\n{}".format(id, session.get("command", ""), output),
         data={
             "id": id,
-            "status": status,
             "command": session.get("command", ""),
             "output": output,
             "return_code": session.get("return_code"),
@@ -155,152 +208,62 @@ def shell_view(id: str = "default") -> ToolResult:
 
 
 def shell_wait(id: str = "default", seconds: int = 5) -> ToolResult:
-    """Wait for N seconds then show session status.
-    Always returns success=True — even if session not found (already done).
-    """
+    """Wait N seconds then show session status. Always returns success=True."""
     seconds = max(1, min(int(seconds) if seconds else 5, 120))
-
-    session = _get_session(id)
-    if session:
-        popen = session.get("popen")
-        if popen and popen.poll() is None:
-            try:
-                popen.wait(timeout=seconds)
-            except subprocess.TimeoutExpired:
-                pass
-        else:
-            time.sleep(min(seconds, 2))
-    else:
-        time.sleep(min(seconds, 2))
-
+    time.sleep(min(seconds, 3))
     return shell_view(id)
 
 
 def shell_write_to_process(id: str, input: str, press_enter: bool = True) -> ToolResult:
-    """Write input to a running Popen process in a shell session.
-    If session has a live process, send stdin to it.
-    If session has a completed command, re-run it with the input piped.
-    If session doesn't exist, execute input as a shell command.
-    """
+    """Send input to an existing session by re-running with piped input."""
     session = _get_session(id)
-
     if not session:
         return ToolResult(
             success=True,
-            message="Session '{}' tidak ditemukan. Jalankan shell_exec terlebih dahulu untuk memulai session.".format(id),
+            message="Session '{}' tidak ditemukan.".format(id),
             data={"id": id, "found": False, "input": input},
         )
-
-    popen: Optional[subprocess.Popen] = session.get("popen")
-
-    if popen and popen.poll() is None:
-        try:
-            text_to_send = input + ("\n" if press_enter else "")
-            popen.stdin.write(text_to_send)
-            popen.stdin.flush()
-            time.sleep(0.5)
-
-            output_lines = []
-            if popen.stdout:
-                import select
-                ready, _, _ = select.select([popen.stdout], [], [], 2.0)
-                if ready:
-                    chunk = popen.stdout.read(4096)
-                    if chunk:
-                        output_lines.append(chunk)
-
-            out = "".join(output_lines)
-            session["output"] += "\n[stdin: {}]\n{}".format(input, out)
-            return ToolResult(
-                success=True,
-                message="Input '{}' dikirim ke process. Output: {}".format(input, out[:500] if out else "(menunggu)"),
-                data={"id": id, "input": input, "output": out},
-            )
-        except Exception as e:
-            return ToolResult(
-                success=False,
-                message="Gagal menulis ke process: {}".format(e),
-                data={"id": id, "error": str(e)},
-            )
-    else:
-        last_command = session.get("command", "")
-        if last_command:
-            try:
-                stdin_data = (input + "\n") if press_enter else input
-                result = subprocess.run(
-                    last_command,
-                    shell=True,
-                    input=stdin_data,
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                    cwd="/tmp",
-                )
-                out = (result.stdout or "") + (result.stderr or "")
-                session["output"] = out
-                session["return_code"] = result.returncode
-                return ToolResult(
-                    success=result.returncode == 0,
-                    message="Re-ran '{}' with input. Output: {}".format(last_command, out[:500]),
-                    data={"id": id, "input": input, "output": out, "return_code": result.returncode},
-                )
-            except Exception as e:
-                return ToolResult(
-                    success=False,
-                    message="Gagal menjalankan ulang command dengan input: {}".format(e),
-                    data={"id": id, "error": str(e)},
-                )
+    last_command = session.get("command", "")
+    if last_command:
+        stdin_data = (input + "\n") if press_enter else input
+        combined_cmd = "echo '{}' | {}".format(stdin_data.strip(), last_command)
+        if E2B_ENABLED:
+            res = _run_e2b(combined_cmd)
         else:
-            return ToolResult(
-                success=True,
-                message="Session '{}' tidak memiliki process aktif. Input '{}' diabaikan.".format(id, input),
-                data={"id": id, "input": input, "found": True, "active": False},
-            )
+            res = _run_local(combined_cmd)
+        out = (res.get("stdout") or "") + (res.get("stderr") or "")
+        session["output"] = out
+        return ToolResult(
+            success=res.get("success", False),
+            message="Input '{}' dikirim. Output: {}".format(input, out[:500]),
+            data={"id": id, "input": input, "output": out},
+        )
+    return ToolResult(
+        success=True,
+        message="Session '{}' tidak memiliki command aktif.".format(id),
+        data={"id": id, "found": True, "active": False},
+    )
 
 
 def shell_kill_process(id: str = "default") -> ToolResult:
-    """Terminate and remove a shell session.
-    Returns success=True even if session already gone (already done).
-    """
+    """Remove/terminate a shell session."""
     with _sessions_lock:
         session = _shell_sessions.pop(id, None)
-
     if not session:
         return ToolResult(
             success=True,
             message="Session '{}' tidak ada atau sudah dihentikan.".format(id),
             data={"id": id, "found": False},
         )
+    return ToolResult(
+        success=True,
+        message="Session '{}' berhasil dihentikan.".format(id),
+        data={"id": id, "found": True},
+    )
 
-    popen: Optional[subprocess.Popen] = session.get("popen")
-    command = session.get("command", "")
-
-    try:
-        if popen and popen.poll() is None:
-            popen.terminate()
-            try:
-                popen.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                popen.kill()
-                popen.wait()
-
-        return ToolResult(
-            success=True,
-            message="Session '{}' (perintah: {}) berhasil dihentikan.".format(id, command),
-            data={"id": id, "command": command, "found": True},
-        )
-    except Exception as e:
-        return ToolResult(
-            success=True,
-            message="Session '{}' dihapus (dengan error: {}).".format(id, e),
-            data={"id": id, "error": str(e), "found": True},
-        )
-
-
-# ─── Class-based ShellTool (Ai-DzeckV2 / Manus pattern) ─────────────────────
 
 class ShellTool(BaseTool):
-    """Shell tool class - provides shell interaction capabilities."""
+    """Shell tool class - routes to E2B cloud sandbox."""
 
     name: str = "shell"
 
@@ -310,14 +273,14 @@ class ShellTool(BaseTool):
     @tool(
         name="shell_exec",
         description=(
-            "Execute commands in a specified shell session. "
+            "Execute commands in a specified shell session via E2B cloud sandbox. "
             "Use for: running code/scripts, installing packages, file management, "
             "starting services, checking system status. "
-            "Commands run synchronously and output is captured."
+            "Commands run in an isolated cloud environment."
         ),
         parameters={
             "id": {"type": "string", "description": "Unique identifier of the target shell session (e.g. 'main', 'build', 'test')"},
-            "exec_dir": {"type": "string", "description": "Working directory for command execution (must be absolute path, e.g. /home/user/project)"},
+            "exec_dir": {"type": "string", "description": "Working directory for command execution (e.g. /home/user/project)"},
             "command": {"type": "string", "description": "Shell command to execute (bash syntax supported)"},
         },
         required=["id", "exec_dir", "command"],
@@ -327,10 +290,7 @@ class ShellTool(BaseTool):
 
     @tool(
         name="shell_view",
-        description=(
-            "View the content of a specified shell session. "
-            "Use for: checking command output, monitoring progress, reading results."
-        ),
+        description="View the content of a specified shell session.",
         parameters={"id": {"type": "string", "description": "Unique identifier of the target shell session"}},
         required=["id"],
     )
@@ -339,13 +299,10 @@ class ShellTool(BaseTool):
 
     @tool(
         name="shell_wait",
-        description=(
-            "Wait for the running process in a shell session to complete. "
-            "Use after shell_exec for long-running commands (builds, installs, etc.)."
-        ),
+        description="Wait N seconds then show session status.",
         parameters={
             "id": {"type": "string", "description": "Unique identifier of the target shell session"},
-            "seconds": {"type": "integer", "description": "Maximum seconds to wait (1-120, default 5)"},
+            "seconds": {"type": "integer", "description": "Seconds to wait (1-120, default 5)"},
         },
         required=["id"],
     )
@@ -354,13 +311,10 @@ class ShellTool(BaseTool):
 
     @tool(
         name="shell_write_to_process",
-        description=(
-            "Write input to a running process in a shell session. "
-            "Use for: responding to interactive prompts, sending keystrokes to running programs."
-        ),
+        description="Send input to a running process in a shell session.",
         parameters={
             "id": {"type": "string", "description": "Unique identifier of the target shell session"},
-            "input": {"type": "string", "description": "Input content to write to the process"},
+            "input": {"type": "string", "description": "Input content to send"},
             "press_enter": {"type": "boolean", "description": "Whether to press Enter after input (default true)"},
         },
         required=["id", "input", "press_enter"],
@@ -370,10 +324,7 @@ class ShellTool(BaseTool):
 
     @tool(
         name="shell_kill_process",
-        description=(
-            "Terminate the running process in a specified shell session. "
-            "Use for: stopping hung commands, cleaning up background processes."
-        ),
+        description="Terminate a shell session.",
         parameters={"id": {"type": "string", "description": "Unique identifier of the target shell session"}},
         required=["id"],
     )

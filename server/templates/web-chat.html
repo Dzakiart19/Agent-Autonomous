@@ -272,6 +272,14 @@
     .tool-screenshot{margin:5px 0 2px 22px;border-radius:9px;overflow:hidden;border:1px solid var(--border);
       max-width:400px;cursor:pointer;display:block;box-shadow:var(--shadow)}
     .tool-screenshot img{width:100%;display:block;max-height:200px;object-fit:cover}
+    .tool-download{margin:5px 0 2px 22px}
+    .tool-download a{display:inline-flex;align-items:center;gap:6px;padding:6px 12px;
+      background:var(--surface2);border:1px solid var(--border);border-radius:8px;
+      color:var(--accent);font-size:12px;font-family:inherit;text-decoration:none;
+      cursor:pointer;transition:background .15s,border-color .15s;max-width:320px;overflow:hidden}
+    .tool-download a:hover{background:var(--surface3);border-color:var(--accent)}
+    .tool-download a svg{flex-shrink:0;color:var(--accent)}
+    .tool-download a span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:500}
 
     /* Plan bar */
     #plan-bar{display:none;background:var(--surface);border:1px solid var(--border);border-radius:11px;
@@ -1092,6 +1100,23 @@ function updateToolChip(tcId, evt) {
     }
   }
   if (tc?.type==='shell'&&tc.console) tpStatus.textContent = tc.console.substring(0,80);
+
+  // ─── File download button ──────────────────────────────────────────────────
+  if (tc?.type==='file' && tc.download_url) {
+    const parent = chip.parentElement;
+    if (parent) {
+      let dlEl = document.getElementById(`dl-${tcId}`);
+      if (!dlEl) {
+        dlEl = document.createElement('div');
+        dlEl.id = `dl-${tcId}`;
+        dlEl.className = 'tool-download';
+        const fname = tc.filename || tc.file ? (tc.filename || tc.file.split('/').pop()) : 'file';
+        dlEl.innerHTML = `<a href="${tc.download_url}" download="${fname}" target="_blank" rel="noopener noreferrer"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2v9"/><polyline points="4 7 8 11 12 7"/><rect x="2" y="13" width="12" height="1" rx="0.5"/></svg><span>${fname}</span></a>`;
+        parent.appendChild(dlEl);
+      }
+    }
+  }
+
   scrollBottom();
 }
 

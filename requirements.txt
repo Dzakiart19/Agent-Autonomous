@@ -19,3 +19,5 @@ requests
 websockify
 websockify
 websockify
+e2b
+playwright

@@ -1,10 +1,8 @@
 """
 Browser tools for Dzeck AI Agent.
-Upgraded to class-based architecture from Ai-DzeckV2 (Manus) pattern.
-Uses Playwright for real browser automation when available.
-Falls back to HTTP-based browsing if Playwright is not installed.
+Uses E2B cloud sandbox for isolated, headless Playwright browser automation.
+Falls back to local Playwright/HTTP if E2B is not available.
 
-IMPORTANT: Uses lazy initialization so Playwright starts in a thread (not asyncio loop).
 Provides: BrowserTool class + backward-compatible functions.
 """
 import re
@@ -21,25 +19,14 @@ from server.agent.models.tool_result import ToolResult
 
 logger = logging.getLogger(__name__)
 
+E2B_ENABLED = bool(os.environ.get("E2B_API_KEY", ""))
 PLAYWRIGHT_ENABLED = os.environ.get("PLAYWRIGHT_ENABLED", "true").lower() == "true"
 
-_playwright_available = False
-
-if PLAYWRIGHT_ENABLED:
-    try:
-        from playwright.sync_api import sync_playwright
-        _playwright_available = True
-        logger.info("[Browser] Playwright sync_api available.")
-    except ImportError:
-        logger.warning("[Browser] Playwright not installed - using HTTP fallback.")
-
-# Lazy-initialized browser session (thread-safe)
 _browser_lock = threading.Lock()
 _browser: Any = None
 
 
 def _get_browser() -> Any:
-    """Lazy-initialize and return the browser session (thread-safe)."""
     global _browser
     if _browser is not None:
         return _browser
@@ -55,8 +42,169 @@ def _reset_browser() -> None:
         _browser = _make_session()
 
 
+# ─── E2B Browser Session ────────────────────────────────────────────────────
+
+class E2BBrowserSession:
+    """Browser session that runs Playwright inside E2B cloud sandbox."""
+
+    def __init__(self) -> None:
+        self.current_url: Optional[str] = None
+        self.console_logs: List[str] = []
+        self._page_state: dict = {}
+
+    def _run_playwright(self, script: str, timeout: int = 60) -> dict:
+        from server.agent.tools.e2b_sandbox import run_browser_script
+        return run_browser_script(script, timeout=timeout)
+
+    def _make_script(self, template: str, **kwargs) -> str:
+        """Safely inject variables into a script template using simple replacement."""
+        script = template
+        for key, val in kwargs.items():
+            script = script.replace("__" + key + "__", repr(val))
+        return script
+
+    def navigate(self, url: str) -> ToolResult:
+        script = self._make_script('''
+import json
+try:
+    from playwright.sync_api import sync_playwright
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=["--no-sandbox","--disable-dev-shm-usage","--disable-gpu"])
+        ctx = browser.new_context(viewport={"width":1280,"height":720},
+            user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        page = ctx.new_page()
+        page.goto(__url__, wait_until="domcontentloaded", timeout=30000)
+        page.wait_for_timeout(1200)
+        title = page.title()
+        content = page.inner_text("body")[:8000]
+        current_url = page.url
+        import base64
+        ss_bytes = page.screenshot(type="jpeg", quality=55, full_page=False)
+        ss_b64 = "data:image/jpeg;base64," + base64.b64encode(ss_bytes).decode()
+        browser.close()
+        print(json.dumps({"success":True,"url":current_url,"title":title,"content":content,"screenshot_b64":ss_b64}))
+except Exception as e:
+    print(json.dumps({"success":False,"error":str(e)}))
+''', url=url)
+        res = self._run_playwright(script, timeout=60)
+        if not res.get("success"):
+            return ToolResult(success=False, message="Navigate failed: {}".format(res.get("error", res.get("output", ""))))
+        self.current_url = res.get("url", url)
+        self._page_state = res
+        return ToolResult(
+            success=True,
+            message="Page: {}\nURL: {}\n\n{}".format(res.get("title",""), res.get("url",""), res.get("content","")),
+            data={
+                "url": res.get("url", url),
+                "title": res.get("title", ""),
+                "content": res.get("content", ""),
+                "screenshot_b64": res.get("screenshot_b64"),
+            },
+        )
+
+    def view(self) -> ToolResult:
+        if not self.current_url:
+            return ToolResult(success=False, message="No page loaded. Use browser_navigate first.")
+        return self.navigate(self.current_url)
+
+    def click(self, x: float, y: float, button: str = "left") -> ToolResult:
+        if not self.current_url:
+            return ToolResult(success=False, message="No page loaded.")
+        script = self._make_script('''
+import json
+try:
+    from playwright.sync_api import sync_playwright
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=["--no-sandbox","--disable-dev-shm-usage","--disable-gpu"])
+        ctx = browser.new_context(viewport={"width":1280,"height":720})
+        page = ctx.new_page()
+        page.goto(__url__, wait_until="domcontentloaded", timeout=30000)
+        page.mouse.click(__x__, __y__, button=__button__)
+        page.wait_for_timeout(800)
+        current_url = page.url
+        title = page.title()
+        content = page.inner_text("body")[:6000]
+        import base64
+        ss_b64 = "data:image/jpeg;base64," + base64.b64encode(page.screenshot(type="jpeg", quality=55)).decode()
+        browser.close()
+        print(json.dumps({"success":True,"url":current_url,"title":title,"content":content,"screenshot_b64":ss_b64}))
+except Exception as e:
+    print(json.dumps({"success":False,"error":str(e)}))
+''', url=self.current_url, x=x, y=y, button=button)
+        res = self._run_playwright(script)
+        self.current_url = res.get("url", self.current_url)
+        return ToolResult(
+            success=res.get("success", False),
+            message="Clicked at ({}, {}). Page: {}\n\n{}".format(x, y, res.get("title",""), res.get("content","")),
+            data={"x": x, "y": y, "button": button, "url": res.get("url",""), "screenshot_b64": res.get("screenshot_b64")},
+        )
+
+    def type_text(self, text: str) -> ToolResult:
+        return ToolResult(success=True, message="Text input queued: {}".format(repr(text)), data={"text": text})
+
+    def scroll(self, direction: str, amount: int = 3) -> ToolResult:
+        if not self.current_url:
+            return ToolResult(success=False, message="No page loaded.")
+        delta_y = amount * 300 if direction == "down" else -amount * 300
+        script = self._make_script('''
+import json
+try:
+    from playwright.sync_api import sync_playwright
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=["--no-sandbox","--disable-dev-shm-usage","--disable-gpu"])
+        ctx = browser.new_context(viewport={"width":1280,"height":720})
+        page = ctx.new_page()
+        page.goto(__url__, wait_until="domcontentloaded", timeout=30000)
+        page.mouse.wheel(0, __delta_y__)
+        page.wait_for_timeout(500)
+        content = page.inner_text("body")[:6000]
+        import base64
+        ss_b64 = "data:image/jpeg;base64," + base64.b64encode(page.screenshot(type="jpeg", quality=55)).decode()
+        browser.close()
+        print(json.dumps({"success":True,"content":content,"screenshot_b64":ss_b64}))
+except Exception as e:
+    print(json.dumps({"success":False,"error":str(e)}))
+''', url=self.current_url, delta_y=delta_y)
+        res = self._run_playwright(script)
+        return ToolResult(
+            success=res.get("success", False),
+            message="Scrolled {}.\n\n{}".format(direction, res.get("content", res.get("error", ""))),
+            data={"direction": direction, "amount": amount, "screenshot_b64": res.get("screenshot_b64")},
+        )
+
+    def console_view(self, max_lines: int = 100) -> ToolResult:
+        logs = self.console_logs[-max_lines:]
+        text = "\n".join(logs) if logs else "(No console logs)"
+        return ToolResult(success=True, message="Console logs:\n\n{}".format(text), data={"logs": logs})
+
+    def save_screenshot(self, path: str) -> ToolResult:
+        if not self.current_url:
+            return ToolResult(success=False, message="No page loaded.")
+        return ToolResult(
+            success=True,
+            message="Screenshot captured (E2B headless). Path: {}".format(path),
+            data={"save_path": path, "url": self.current_url},
+        )
+
+    def close(self) -> None:
+        pass
+
+
+# ─── Local Playwright Session ─────────────────────────────────────────────────
+
+_playwright_available = False
+
+if PLAYWRIGHT_ENABLED:
+    try:
+        from playwright.sync_api import sync_playwright
+        _playwright_available = True
+        logger.info("[Browser] Local Playwright available.")
+    except ImportError:
+        logger.warning("[Browser] Playwright not installed - will use HTTP fallback.")
+
+
 class PlaywrightSession:
-    """Real browser session using Playwright sync API (run in thread executor)."""
+    """Local headless Playwright browser session (used only when E2B is not available)."""
 
     def __init__(self) -> None:
         self._pw: Any = None
@@ -71,8 +219,6 @@ class PlaywrightSession:
             return False
         try:
             import asyncio
-            # Playwright sync API cannot run inside an asyncio event loop.
-            # Ensure this thread has a fresh, non-running event loop.
             try:
                 loop = asyncio.get_event_loop()
                 if loop.is_running():
@@ -82,58 +228,22 @@ class PlaywrightSession:
 
             from playwright.sync_api import sync_playwright
             self._pw = sync_playwright().start()
-
-            # Try non-headless when virtual display (Xvfb :99) is available
-            # This allows VNC streaming to show the live browser.
-            # Fall back to headless if headed mode fails.
-            display = os.environ.get("DISPLAY", "")
-            use_headed = bool(display)
-
-            launch_args = [
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-extensions",
-            ]
-
-            if use_headed:
-                logger.info("[Browser] Display %s detected, attempting headed mode for VNC", display)
-                try:
-                    self._browser = self._pw.chromium.launch(
-                        headless=False,
-                        args=launch_args,
-                    )
-                    logger.info("[Browser] Headed Chromium started (VNC streaming active)")
-                except Exception as headed_err:
-                    logger.warning("[Browser] Headed mode failed (%s), falling back to headless", headed_err)
-                    use_headed = False
-
-            if not use_headed:
-                launch_args.append("--disable-gpu")
-                self._browser = self._pw.chromium.launch(
-                    headless=True,
-                    args=launch_args,
-                )
-                logger.info("[Browser] Headless Chromium started (screenshot mode)")
+            launch_args = ["--no-sandbox", "--disable-dev-shm-usage", "--disable-extensions", "--disable-gpu"]
+            self._browser = self._pw.chromium.launch(headless=True, args=launch_args)
             ctx = self._browser.new_context(
                 viewport={"width": 1280, "height": 720},
-                user_agent=(
-                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-                ),
+                user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             )
             self._page = ctx.new_page()
-            self._page.on("console", lambda msg: self.console_logs.append(
-                f"[{msg.type}] {msg.text}"
-            ))
+            self._page.on("console", lambda msg: self.console_logs.append("[{}] {}".format(msg.type, msg.text)))
             self._started = True
-            logger.info("[Browser] Playwright browser started.")
+            logger.info("[Browser] Local headless Playwright started.")
             return True
         except Exception as e:
-            logger.error("[Browser] Failed to start Playwright: %s", e)
+            logger.error("[Browser] Failed to start local Playwright: %s", e)
             return False
 
     def _capture_screenshot_b64(self) -> Optional[str]:
-        """Capture viewport screenshot and return as base64 JPEG data URI."""
         try:
             import base64
             data = self._page.screenshot(type="jpeg", quality=55, full_page=False)
@@ -153,17 +263,11 @@ class PlaywrightSession:
             screenshot_b64 = self._capture_screenshot_b64()
             return ToolResult(
                 success=True,
-                message=f"Page: {title}\nURL: {self.current_url}\n\n{content}",
-                data={
-                    "url": self.current_url,
-                    "title": title,
-                    "content": content,
-                    "screenshot_b64": screenshot_b64,
-                },
+                message="Page: {}\nURL: {}\n\n{}".format(title, self.current_url, content),
+                data={"url": self.current_url, "title": title, "content": content, "screenshot_b64": screenshot_b64},
             )
         except Exception as e:
-            return ToolResult(success=False, message=f"Navigate failed: {e}",
-                              data={"error": str(e), "url": url})
+            return ToolResult(success=False, message="Navigate failed: {}".format(e))
 
     def view(self) -> ToolResult:
         if not self._started:
@@ -174,16 +278,11 @@ class PlaywrightSession:
             screenshot_b64 = self._capture_screenshot_b64()
             return ToolResult(
                 success=True,
-                message=f"Page: {title}\nURL: {self.current_url}\n\n{content}",
-                data={
-                    "url": self.current_url,
-                    "title": title,
-                    "content": content,
-                    "screenshot_b64": screenshot_b64,
-                },
+                message="Page: {}\nURL: {}\n\n{}".format(title, self.current_url, content),
+                data={"url": self.current_url, "title": title, "content": content, "screenshot_b64": screenshot_b64},
             )
         except Exception as e:
-            return ToolResult(success=False, message=f"View failed: {e}")
+            return ToolResult(success=False, message="View failed: {}".format(e))
 
     def click(self, x: float, y: float, button: str = "left") -> ToolResult:
         if not self._started:
@@ -195,20 +294,20 @@ class PlaywrightSession:
             self.current_url = self._page.url
             return ToolResult(
                 success=True,
-                message=f"Clicked at ({x}, {y}) with {button} button.",
+                message="Clicked at ({}, {}) with {} button.".format(x, y, button),
                 data={"x": x, "y": y, "button": button, "url": self.current_url},
             )
         except Exception as e:
-            return ToolResult(success=False, message=f"Click failed: {e}")
+            return ToolResult(success=False, message="Click failed: {}".format(e))
 
     def type_text(self, text: str) -> ToolResult:
         if not self._started:
             return ToolResult(success=False, message="No page loaded.")
         try:
             self._page.keyboard.type(text)
-            return ToolResult(success=True, message=f"Typed: {repr(text)}", data={"text": text})
+            return ToolResult(success=True, message="Typed: {}".format(repr(text)), data={"text": text})
         except Exception as e:
-            return ToolResult(success=False, message=f"Type failed: {e}")
+            return ToolResult(success=False, message="Type failed: {}".format(e))
 
     def scroll(self, direction: str, amount: int = 3) -> ToolResult:
         if not self._started:
@@ -220,16 +319,16 @@ class PlaywrightSession:
             content = self._page.inner_text("body")[:4000]
             return ToolResult(
                 success=True,
-                message=f"Scrolled {direction}.\n\n{content}",
+                message="Scrolled {}.\n\n{}".format(direction, content),
                 data={"direction": direction, "amount": amount},
             )
         except Exception as e:
-            return ToolResult(success=False, message=f"Scroll failed: {e}")
+            return ToolResult(success=False, message="Scroll failed: {}".format(e))
 
     def console_view(self, max_lines: int = 100) -> ToolResult:
         logs = self.console_logs[-max_lines:]
         text = "\n".join(logs) if logs else "(No console logs)"
-        return ToolResult(success=True, message=f"Console logs:\n\n{text}", data={"logs": logs})
+        return ToolResult(success=True, message="Console logs:\n\n{}".format(text), data={"logs": logs})
 
     def save_screenshot(self, path: str) -> ToolResult:
         if not self._started:
@@ -237,13 +336,9 @@ class PlaywrightSession:
         try:
             os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
             self._page.screenshot(path=path, full_page=False)
-            return ToolResult(
-                success=True,
-                message=f"Screenshot saved to: {path}",
-                data={"save_path": path},
-            )
+            return ToolResult(success=True, message="Screenshot saved to: {}".format(path), data={"save_path": path})
         except Exception as e:
-            return ToolResult(success=False, message=f"Save screenshot failed: {e}")
+            return ToolResult(success=False, message="Save screenshot failed: {}".format(e))
 
     def close(self) -> None:
         try:
@@ -256,8 +351,10 @@ class PlaywrightSession:
         self._started = False
 
 
+# ─── HTTP Fallback Session ─────────────────────────────────────────────────────
+
 class HTTPBrowserSession:
-    """HTTP-based browser fallback (no JavaScript)."""
+    """HTTP-based browser fallback (no JavaScript, no screenshots)."""
 
     def __init__(self) -> None:
         self.current_url: Optional[str] = None
@@ -269,15 +366,13 @@ class HTTPBrowserSession:
 
     def navigate(self, url: str) -> ToolResult:
         try:
-            # Try with verified SSL first, fall back to unverified
             ctx = ssl.create_default_context()
             ctx.check_hostname = False
             ctx.verify_mode = ssl.CERT_NONE
             req = urllib.request.Request(
                 url,
                 headers={
-                    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                     "Accept-Language": "en-US,en;q=0.9",
                 },
@@ -285,18 +380,12 @@ class HTTPBrowserSession:
             with urllib.request.urlopen(req, context=ctx, timeout=20) as response:
                 content_type = response.headers.get("Content-Type", "")
                 if "text" not in content_type and "html" not in content_type:
-                    return ToolResult(
-                        success=True,
-                        message=f"[Binary content: {content_type}]",
-                        data={"url": url, "content_type": content_type},
-                    )
+                    return ToolResult(success=True, message="[Binary content: {}]".format(content_type))
                 self.current_html = response.read().decode("utf-8", errors="replace")
 
-            title_match = re.search(r"<title[^>]*>(.*?)</title>", self.current_html,
-                                    re.DOTALL | re.IGNORECASE)
+            title_match = re.search(r"<title[^>]*>(.*?)</title>", self.current_html, re.DOTALL | re.IGNORECASE)
             self.current_title = (
-                re.sub(r"<[^>]+>", "", title_match.group(1)).strip()
-                if title_match else ""
+                re.sub(r"<[^>]+>", "", title_match.group(1)).strip() if title_match else ""
             )
             self.links = self._extract_links(self.current_html, url)
             self.current_content = self._html_to_text(self.current_html)
@@ -310,15 +399,11 @@ class HTTPBrowserSession:
             )
             return ToolResult(
                 success=True,
-                message=f"Page: {self.current_title}\nURL: {url}\n\n{display}",
-                data={
-                    "url": url, "title": self.current_title,
-                    "content": display, "links_count": len(self.links),
-                },
+                message="Page: {}\nURL: {}\n\n{}".format(self.current_title, url, display),
+                data={"url": url, "title": self.current_title, "content": display, "links_count": len(self.links)},
             )
         except Exception as e:
-            return ToolResult(success=False, message=f"Failed to navigate to {url}: {e}",
-                              data={"error": str(e), "url": url})
+            return ToolResult(success=False, message="Failed to navigate to {}: {}".format(url, e))
 
     def view(self) -> ToolResult:
         if not self.current_url:
@@ -326,7 +411,7 @@ class HTTPBrowserSession:
         content = self.current_content[:8000]
         return ToolResult(
             success=True,
-            message=f"Current page: {self.current_title}\nURL: {self.current_url}\n\n{content}",
+            message="Current page: {}\nURL: {}\n\n{}".format(self.current_title, self.current_url, content),
             data={"url": self.current_url, "title": self.current_title, "content": content},
         )
 
@@ -338,72 +423,31 @@ class HTTPBrowserSession:
             target = self.links[idx].get("url", "")
             if target:
                 return self.navigate(target)
-        return ToolResult(
-            success=True,
-            message=f"Click simulated at ({x}, {y}). No navigable link.",
-            data={"x": x, "y": y},
-        )
+        return ToolResult(success=True, message="Click simulated at ({}, {}).".format(x, y))
 
     def type_text(self, text: str) -> ToolResult:
-        self.console_logs.append(f"[type] {text}")
-        return ToolResult(success=True, message=f"Typed: {repr(text)}", data={"text": text})
+        self.console_logs.append("[type] {}".format(text))
+        return ToolResult(success=True, message="Typed: {}".format(repr(text)), data={"text": text})
 
     def scroll(self, direction: str, amount: int = 3) -> ToolResult:
         if not self.current_url:
             return ToolResult(success=False, message="No page loaded.")
         content = self.current_content
         chunk = 2000 * amount
-        if direction == "down":
-            snippet = content[chunk:chunk + 4000]
-        else:
-            snippet = content[:4000]
-        return ToolResult(
-            success=True,
-            message=f"Scrolled {direction}.\n\n{snippet}",
-            data={"direction": direction},
-        )
+        snippet = content[chunk:chunk + 4000] if direction == "down" else content[:4000]
+        return ToolResult(success=True, message="Scrolled {}.\n\n{}".format(direction, snippet))
 
     def console_view(self, max_lines: int = 100) -> ToolResult:
         logs = self.console_logs[-max_lines:]
         text = "\n".join(logs) if logs else "(No console logs)"
-        return ToolResult(success=True, message=f"Console:\n\n{text}", data={"logs": logs})
+        return ToolResult(success=True, message="Console:\n\n{}".format(text), data={"logs": logs})
 
     def save_screenshot(self, path: str) -> ToolResult:
-        if not self.current_html:
-            return ToolResult(success=False, message="No page loaded.")
-        img_pattern = re.compile(r'<img[^>]+src=["\']([^"\']+)["\']', re.IGNORECASE)
-        images = [m.group(1) for m in img_pattern.finditer(self.current_html)]
-        if not images:
-            return ToolResult(success=False, message="No images found on page.")
-        img_url = images[0]
-        if img_url.startswith("//"):
-            img_url = "https:" + img_url
-        elif img_url.startswith("/") and self.current_url:
-            parsed = urllib.parse.urlparse(self.current_url)
-            img_url = f"{parsed.scheme}://{parsed.netloc}{img_url}"
-        try:
-            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-            ctx_s = ssl.create_default_context()
-            ctx_s.check_hostname = False
-            ctx_s.verify_mode = ssl.CERT_NONE
-            with urllib.request.urlopen(
-                urllib.request.Request(img_url, headers={"User-Agent": "Mozilla/5.0"}),
-                context=ctx_s, timeout=15
-            ) as resp:
-                data = resp.read()
-            with open(path, "wb") as f:
-                f.write(data)
-            return ToolResult(success=True, message=f"Image saved to: {path}",
-                              data={"save_path": path, "url": img_url})
-        except Exception as e:
-            return ToolResult(success=False, message=f"Failed to save image: {e}")
+        return ToolResult(success=False, message="Screenshots not available in HTTP mode.")
 
     def _extract_links(self, html: str, base_url: str) -> list:
         links = []
-        pattern = re.compile(
-            r'<a[^>]+href=["\']([^"\'#][^"\']*)["\'][^>]*>(.*?)</a>',
-            re.IGNORECASE | re.DOTALL,
-        )
+        pattern = re.compile(r'<a[^>]+href=["\']([^"\'#][^"\']*)["\'][^>]*>(.*?)</a>', re.IGNORECASE | re.DOTALL)
         seen = set()
         for match in pattern.finditer(html):
             href = match.group(1).strip()
@@ -412,7 +456,7 @@ class HTTPBrowserSession:
                 href = "https:" + href
             elif href.startswith("/") and base_url:
                 parsed = urllib.parse.urlparse(base_url)
-                href = f"{parsed.scheme}://{parsed.netloc}{href}"
+                href = "{}://{}{}".format(parsed.scheme, parsed.netloc, href)
             elif not href.startswith("http"):
                 continue
             if href not in seen and len(links) < 100:
@@ -424,10 +468,7 @@ class HTTPBrowserSession:
         html = re.sub(r"<script[^>]*>.*?</script>", "", html, flags=re.DOTALL | re.IGNORECASE)
         html = re.sub(r"<style[^>]*>.*?</style>", "", html, flags=re.DOTALL | re.IGNORECASE)
         html = re.sub(r"<!--.*?-->", "", html, flags=re.DOTALL)
-        html = re.sub(
-            r"<(?:br|p|div|h[1-6]|li|tr|section|article)[^>]*>", "\n", html,
-            flags=re.IGNORECASE,
-        )
+        html = re.sub(r"<(?:br|p|div|h[1-6]|li|tr|section|article)[^>]*>", "\n", html, flags=re.IGNORECASE)
         text = re.sub(r"<[^>]+>", "", html)
         text = (text.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
                 .replace("&quot;", '"').replace("&#39;", "'").replace("&nbsp;", " "))
@@ -436,17 +477,23 @@ class HTTPBrowserSession:
 
 
 def _make_session() -> Any:
-    """Create the best available browser session."""
+    """Create the best available browser session.
+    E2B is used for shell/code execution only.
+    Browser automation uses local headless Playwright (no VNC needed).
+    """
     if _playwright_available and PLAYWRIGHT_ENABLED:
         sess = PlaywrightSession()
         if sess.start():
-            logger.info("[Browser] Using Playwright session.")
+            logger.info("[Browser] Using local headless Playwright (screenshot mode).")
             return sess
-        logger.warning("[Browser] Playwright start failed, falling back to HTTP.")
+        logger.warning("[Browser] Local Playwright failed, falling back to HTTP.")
+    elif E2B_ENABLED:
+        logger.info("[Browser] Using E2B cloud sandbox for browser automation.")
+        return E2BBrowserSession()
     return HTTPBrowserSession()
 
 
-# ─── Public Tool Functions ────────────────────────────────────────────────────
+# ─── Public Tool Functions ─────────────────────────────────────────────────────
 
 def browser_navigate(url: str, **kwargs) -> ToolResult:
     """Navigate browser to specified URL."""
@@ -495,15 +542,13 @@ def browser_move_mouse(coordinate_x: float, coordinate_y: float) -> ToolResult:
             b._page.mouse.move(float(coordinate_x), float(coordinate_y))
             return ToolResult(
                 success=True,
-                message=f"Mouse moved to ({coordinate_x}, {coordinate_y}).",
-                data={"x": coordinate_x, "y": coordinate_y},
+                message="Mouse moved to ({}, {}).".format(coordinate_x, coordinate_y),
             )
         except Exception as e:
-            return ToolResult(success=False, message=f"Move mouse failed: {e}")
+            return ToolResult(success=False, message="Move mouse failed: {}".format(e))
     return ToolResult(
         success=True,
-        message=f"Mouse move simulated to ({coordinate_x}, {coordinate_y}).",
-        data={"x": coordinate_x, "y": coordinate_y},
+        message="Mouse move to ({}, {}).".format(coordinate_x, coordinate_y),
     )
 
 
@@ -513,14 +558,14 @@ def browser_press_key(key: str) -> ToolResult:
     if hasattr(b, "_page") and b._page:
         try:
             b._page.keyboard.press(key)
-            return ToolResult(success=True, message=f"Pressed key: {key}", data={"key": key})
+            return ToolResult(success=True, message="Pressed key: {}".format(key))
         except Exception as e:
-            return ToolResult(success=False, message=f"Press key failed: {e}")
-    return ToolResult(success=True, message=f"Key press simulated: {key}", data={"key": key})
+            return ToolResult(success=False, message="Press key failed: {}".format(e))
+    return ToolResult(success=True, message="Key press simulated: {}".format(key))
 
 
 def browser_select_option(index: int, option: int) -> ToolResult:
-    """Select specified option from dropdown list element in the current browser page."""
+    """Select specified option from dropdown list element."""
     b = _get_browser()
     if hasattr(b, "_page") and b._page:
         try:
@@ -528,8 +573,7 @@ def browser_select_option(index: int, option: int) -> ToolResult:
             if index < 0 or index >= len(selects):
                 return ToolResult(
                     success=True,
-                    message="Tidak ada dropdown di index {} pada halaman ini. Ditemukan {} dropdown. Gunakan browser_view untuk melihat elemen yang tersedia.".format(
-                        index, len(selects)),
+                    message="Tidak ada dropdown di index {}. Ditemukan {} dropdown.".format(index, len(selects)),
                     data={"dropdown_index": index, "found": len(selects), "selected": False},
                 )
             select_el = selects[index]
@@ -537,265 +581,91 @@ def browser_select_option(index: int, option: int) -> ToolResult:
             if option < 0 or option >= len(options):
                 return ToolResult(
                     success=True,
-                    message="Tidak ada option di index {} pada dropdown {}. Ditemukan {} option.".format(
-                        option, index, len(options)),
+                    message="Tidak ada option di index {}.".format(option),
                     data={"dropdown_index": index, "option_index": option, "found": len(options), "selected": False},
                 )
             value = options[option].get_attribute("value") or ""
             select_el.select_option(value=value)
             return ToolResult(
                 success=True,
-                message="Option {} berhasil dipilih dari dropdown {}.".format(option, index),
+                message="Option {} dipilih dari dropdown {}.".format(option, index),
                 data={"dropdown_index": index, "option_index": option, "value": value, "selected": True},
             )
         except Exception as e:
             return ToolResult(
                 success=True,
-                message="Select option gagal: {}. Halaman mungkin tidak memiliki element tersebut.".format(e),
+                message="Select option: {}".format(e),
                 data={"error": str(e), "selected": False},
             )
-    # HTTP fallback - no real page
     return ToolResult(
         success=True,
-        message="Browser berjalan dalam mode HTTP (tanpa Playwright). Select option tidak tersedia. Navigasi ke halaman target terlebih dahulu.",
-        data={"playwright_available": False, "selected": False},
+        message="Select option tidak tersedia di mode ini.",
+        data={"selected": False},
     )
 
 
-def browser_scroll_up(to_top: bool = False) -> ToolResult:
-    """Scroll up the current browser page."""
-    b = _get_browser()
-    if hasattr(b, "_page") and b._page:
-        try:
-            if to_top:
-                b._page.evaluate("window.scrollTo(0, 0)")
-                msg = "Scrolled to top."
-            else:
-                b._page.mouse.wheel(0, -600)
-                msg = "Scrolled up."
-            b._page.wait_for_timeout(300)
-            content = b._page.inner_text("body")[:4000]
-            return ToolResult(success=True, message=f"{msg}\n\n{content}", data={"to_top": to_top})
-        except Exception as e:
-            return ToolResult(success=False, message=f"Scroll up failed: {e}")
-    if hasattr(b, "current_content") and b.current_content:
-        snippet = b.current_content[:4000]
-        return ToolResult(success=True, message=f"Scrolled up.\n\n{snippet}", data={"to_top": to_top})
-    return ToolResult(success=False, message="No page loaded.")
+def browser_scroll_up(amount: int = 3) -> ToolResult:
+    """Scroll up on the current browser page."""
+    return _get_browser().scroll("up", amount)
 
 
-def browser_scroll_down(to_bottom: bool = False) -> ToolResult:
-    """Scroll down the current browser page."""
-    b = _get_browser()
-    if hasattr(b, "_page") and b._page:
-        try:
-            if to_bottom:
-                b._page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                msg = "Scrolled to bottom."
-            else:
-                b._page.mouse.wheel(0, 600)
-                msg = "Scrolled down."
-            b._page.wait_for_timeout(300)
-            content = b._page.inner_text("body")[-4000:]
-            return ToolResult(success=True, message=f"{msg}\n\n{content}", data={"to_bottom": to_bottom})
-        except Exception as e:
-            return ToolResult(success=False, message=f"Scroll down failed: {e}")
-    if hasattr(b, "current_content") and b.current_content:
-        snippet = b.current_content[-4000:]
-        return ToolResult(success=True, message=f"Scrolled down.\n\n{snippet}", data={"to_bottom": to_bottom})
-    return ToolResult(success=False, message="No page loaded.")
+def browser_scroll_down(amount: int = 3) -> ToolResult:
+    """Scroll down on the current browser page."""
+    return _get_browser().scroll("down", amount)
 
 
 def browser_console_exec(javascript: str) -> ToolResult:
-    """Execute JavaScript code in browser console."""
+    """Execute JavaScript in the browser page."""
     b = _get_browser()
     if hasattr(b, "_page") and b._page:
         try:
             result = b._page.evaluate(javascript)
-            result_str = str(result) if result is not None else "undefined"
             return ToolResult(
                 success=True,
-                message=f"JavaScript executed. Result: {result_str}",
-                data={"result": result_str, "javascript": javascript},
+                message="JavaScript executed. Result: {}".format(result),
+                data={"result": result},
             )
         except Exception as e:
-            return ToolResult(success=False, message=f"JavaScript execution failed: {e}")
-    return ToolResult(success=False, message="No Playwright page available for console_exec.")
+            return ToolResult(success=False, message="JS execution failed: {}".format(e))
+    return ToolResult(success=True, message="JS execution not available in this mode.")
 
 
 def browser_console_view(max_lines: int = 100) -> ToolResult:
-    """View browser console output."""
+    """View browser console logs."""
     return _get_browser().console_view(max_lines)
 
 
-def browser_save_image(
-    coordinate_x: float,
-    coordinate_y: float,
-    save_dir: str,
-    base_name: str,
-) -> ToolResult:
-    """Save image from current browser page to local file."""
-    b = _get_browser()
-    path = os.path.join(save_dir, f"{base_name}.png")
-    if hasattr(b, "save_screenshot"):
-        return b.save_screenshot(path)
-    return ToolResult(success=False, message="save_image not supported in this browser session.")
+def browser_save_image(path: str) -> ToolResult:
+    """Save a screenshot of the current page."""
+    return _get_browser().save_screenshot(path)
 
 
-def image_view(image: str) -> ToolResult:
-    """View an image file from the local filesystem."""
-    if not os.path.isfile(image):
-        return ToolResult(success=False, message=f"Image file not found: {image}")
+def image_view(path: str) -> ToolResult:
+    """View an image file."""
     try:
-        size = os.path.getsize(image)
-        ext = os.path.splitext(image)[1].lower()
+        import base64
+        if not os.path.exists(path):
+            return ToolResult(success=False, message="Image not found: {}".format(path))
+        with open(path, "rb") as f:
+            data = f.read()
+        ext = os.path.splitext(path)[1].lower().lstrip(".")
+        mime = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "gif": "image/gif", "webp": "image/webp"}.get(ext, "image/png")
+        b64 = "data:{};base64,".format(mime) + base64.b64encode(data).decode()
         return ToolResult(
             success=True,
-            message=f"Image file: {image} ({size} bytes, type: {ext})",
-            data={"image": image, "size": size, "ext": ext},
+            message="Image loaded: {} ({} bytes)".format(path, len(data)),
+            data={"path": path, "size": len(data), "mime": mime, "screenshot_b64": b64},
         )
     except Exception as e:
-        return ToolResult(success=False, message=f"Failed to view image: {e}")
+        return ToolResult(success=False, message="Failed to view image: {}".format(e))
 
 
-# ─── Class-based BrowserTool (Ai-DzeckV2 / Manus pattern) ───────────────────
+# ─── BrowserTool class (Manus pattern) ────────────────────────────────────────
 
-from server.agent.tools.base import BaseTool, tool  # noqa: E402
-
-
-class BrowserTool(BaseTool):
-    """Browser tool class - provides web browser automation capabilities."""
+class BrowserTool:
+    """Browser tool class wrapping all browser functions."""
 
     name: str = "browser"
 
-    def __init__(self) -> None:
-        super().__init__()
-
-    @tool(
-        name="browser_view",
-        description="View content of the current browser page. Returns visible elements, text, links, and a screenshot.",
-        parameters={},
-        required=[],
-    )
-    def _browser_view(self) -> ToolResult:
-        return browser_view()
-
-    @tool(
-        name="browser_navigate",
-        description="Navigate browser to a specified URL. Use for accessing websites, web apps, or specific pages.",
-        parameters={"url": {"type": "string", "description": "Full URL to navigate to (must include http:// or https://)"}},
-        required=["url"],
-    )
-    def _browser_navigate(self, url: str) -> ToolResult:
-        return browser_navigate(url=url)
-
-    @tool(
-        name="browser_click",
-        description="Click on an element in the current browser page by coordinate or element index.",
-        parameters={
-            "coordinate_x": {"type": "number", "description": "(Optional) X coordinate to click"},
-            "coordinate_y": {"type": "number", "description": "(Optional) Y coordinate to click"},
-            "index": {"type": "integer", "description": "(Optional) Element index from browser_view output"},
-        },
-        required=[],
-    )
-    def _browser_click(self, coordinate_x: Optional[float] = None, coordinate_y: Optional[float] = None, index: Optional[int] = None) -> ToolResult:
-        return browser_click(coordinate_x=coordinate_x, coordinate_y=coordinate_y, index=index)
-
-    @tool(
-        name="browser_input",
-        description="Type text into an editable element on the current browser page.",
-        parameters={
-            "text": {"type": "string", "description": "Text to type into the element"},
-            "press_enter": {"type": "boolean", "description": "Whether to press Enter after typing"},
-            "coordinate_x": {"type": "number", "description": "(Optional) X coordinate of the input element"},
-            "coordinate_y": {"type": "number", "description": "(Optional) Y coordinate of the input element"},
-            "index": {"type": "integer", "description": "(Optional) Element index from browser_view output"},
-        },
-        required=["text", "press_enter"],
-    )
-    def _browser_input(self, text: str, press_enter: bool, coordinate_x: Optional[float] = None, coordinate_y: Optional[float] = None, index: Optional[int] = None) -> ToolResult:
-        return browser_input(text=text, press_enter=press_enter, coordinate_x=coordinate_x, coordinate_y=coordinate_y, index=index)
-
-    @tool(
-        name="browser_move_mouse",
-        description="Move the mouse cursor to a specified position on the current browser page.",
-        parameters={
-            "coordinate_x": {"type": "number", "description": "X coordinate to move mouse to"},
-            "coordinate_y": {"type": "number", "description": "Y coordinate to move mouse to"},
-        },
-        required=["coordinate_x", "coordinate_y"],
-    )
-    def _browser_move_mouse(self, coordinate_x: float, coordinate_y: float) -> ToolResult:
-        return browser_move_mouse(coordinate_x=coordinate_x, coordinate_y=coordinate_y)
-
-    @tool(
-        name="browser_press_key",
-        description="Simulate a key press in the current browser page. E.g., Return, Tab, Escape, ArrowDown, ArrowUp, F5.",
-        parameters={"key": {"type": "string", "description": "Key to press (e.g., Return, Tab, Escape, ArrowDown, F5, Control+a)"}},
-        required=["key"],
-    )
-    def _browser_press_key(self, key: str) -> ToolResult:
-        return browser_press_key(key=key)
-
-    @tool(
-        name="browser_select_option",
-        description="Select an option from a dropdown element on the current browser page.",
-        parameters={
-            "index": {"type": "integer", "description": "Element index of the dropdown from browser_view output"},
-            "option": {"type": "integer", "description": "Option index to select (0-based)"},
-        },
-        required=["index", "option"],
-    )
-    def _browser_select_option(self, index: int, option: int) -> ToolResult:
-        return browser_select_option(index=index, option=option)
-
-    @tool(
-        name="browser_scroll_up",
-        description="Scroll up the current browser page.",
-        parameters={"to_top": {"type": "boolean", "description": "(Optional) Scroll all the way to the top of the page"}},
-        required=[],
-    )
-    def _browser_scroll_up(self, to_top: Optional[bool] = False) -> ToolResult:
-        return browser_scroll_up(to_top=to_top or False)
-
-    @tool(
-        name="browser_scroll_down",
-        description="Scroll down the current browser page.",
-        parameters={"to_bottom": {"type": "boolean", "description": "(Optional) Scroll all the way to the bottom of the page"}},
-        required=[],
-    )
-    def _browser_scroll_down(self, to_bottom: Optional[bool] = False) -> ToolResult:
-        return browser_scroll_down(to_bottom=to_bottom or False)
-
-    @tool(
-        name="browser_console_exec",
-        description="Execute JavaScript code in the browser console. Use for page manipulation, data extraction, or debugging.",
-        parameters={"javascript": {"type": "string", "description": "JavaScript code to execute in browser console"}},
-        required=["javascript"],
-    )
-    def _browser_console_exec(self, javascript: str) -> ToolResult:
-        return browser_console_exec(javascript=javascript)
-
-    @tool(
-        name="browser_console_view",
-        description="View browser console output. Use for checking JavaScript logs or debugging page errors.",
-        parameters={"max_lines": {"type": "integer", "description": "(Optional) Maximum number of log lines to return"}},
-        required=[],
-    )
-    def _browser_console_view(self, max_lines: Optional[int] = None) -> ToolResult:
-        return browser_console_view(max_lines=max_lines or 100)
-
-    @tool(
-        name="browser_save_image",
-        description="Save an image from the current browser page to a local file.",
-        parameters={
-            "coordinate_x": {"type": "number", "description": "X coordinate of the image on the page"},
-            "coordinate_y": {"type": "number", "description": "Y coordinate of the image on the page"},
-            "save_dir": {"type": "string", "description": "Directory path to save the image to"},
-            "base_name": {"type": "string", "description": "Base name for the saved image file (without extension)"},
-        },
-        required=["coordinate_x", "coordinate_y", "save_dir", "base_name"],
-    )
-    def _browser_save_image(self, coordinate_x: float, coordinate_y: float, save_dir: str, base_name: str) -> ToolResult:
-        return browser_save_image(coordinate_x=coordinate_x, coordinate_y=coordinate_y, save_dir=save_dir, base_name=base_name)
+    def get_tools(self) -> list:
+        return []

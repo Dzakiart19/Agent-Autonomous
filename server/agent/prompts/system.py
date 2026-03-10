@@ -118,7 +118,7 @@ You are operating in an agent loop, iteratively completing tasks through these s
 </info_rules>
 
 <browser_rules>
-- Must use browser tools to access and comprehend all URLs provided by users in messages
+- Must use browser tools (web_browse, browser_navigate, browser_click, etc.) to access and comprehend all URLs
 - Must use browser tools to access URLs from search tool results
 - Actively explore valuable links for deeper information, either by clicking elements or accessing URLs directly
 - Browser tools only return elements in visible viewport by default
@@ -128,6 +128,8 @@ You are operating in an agent loop, iteratively completing tasks through these s
 - Extracted Markdown includes text beyond viewport but omits links and images; completeness not guaranteed
 - If extracted Markdown is complete and sufficient for the task, no scrolling is needed; otherwise, must actively scroll to view the page
 - Use message tools to suggest user to take over the browser for sensitive operations or actions with side effects when necessary
+- CRITICAL: NEVER use shell commands like `google-chrome`, `chromium`, `firefox`, `xdg-open`, `sensible-browser`, `x-www-browser`, or any GUI browser command — they do NOT work in the cloud sandbox and will hang forever. Always use the `web_browse` tool for web navigation.
+- CRITICAL: NEVER use `xdg-open`, `gnome-open`, or similar "open file/URL" commands — they require a graphical desktop. Use `web_browse` for URLs, `file_read` for files.
 </browser_rules>
 
 <shell_rules>
@@ -137,6 +139,9 @@ You are operating in an agent loop, iteratively completing tasks through these s
 - Use pipe operator to pass command outputs, simplifying operations
 - Use non-interactive `bc` for simple calculations, Python for complex math; never calculate mentally
 - Use `uptime` command when users explicitly request sandbox status check or wake-up
+- CRITICAL: The shell runs in a headless cloud sandbox — there is NO graphical display (no X11, no DISPLAY). GUI applications will FAIL immediately. Forbidden shell commands include: google-chrome, chromium, firefox, xdg-open, gnome-open, vlc, mpv, gimp, inkscape, evince, xterm, startx, Xvfb, and any other GUI program. Use web_browse tool for web access instead.
+- For installing Python packages: use `pip install <package>` in shell_exec
+- For installing system packages: use `apt-get install -y <package>` or `pip install <package>`
 </shell_rules>
 
 <coding_rules>

@@ -423,8 +423,10 @@ def build_tool_content(tool_name: str, tool_result: ToolResult) -> Optional[Dict
         return {
             "type": "file",
             "file": data.get("file", data.get("image", data.get("path", ""))),
+            "filename": data.get("filename", ""),
             "content": str(data.get("content", ""))[:2000],
             "operation": tool_name.replace("file_", ""),
+            "download_url": data.get("download_url", ""),
         }
     elif tool_name in ("mcp_call_tool", "mcp_list_tools"):
         return {"type": "mcp", "tool": data.get("tool_name", ""), "result": str(data)[:2000]}

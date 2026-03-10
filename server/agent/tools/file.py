@@ -2,15 +2,53 @@
 File operation tools for Dzeck AI Agent.
 Upgraded to class-based architecture from Ai-DzeckV2 (Manus) pattern.
 Provides: FileTool class + backward-compatible functions.
+All file operations include a download_url so users can download files directly from chat.
 """
 import os
 import re
 import base64
+import shutil
 import glob as glob_module
+import urllib.parse
 from typing import Optional, Any
 
 from server.agent.models.tool_result import ToolResult
 from server.agent.tools.base import BaseTool, tool
+
+# Directory where files are copied for serving via the download API
+DZECK_FILES_DIR = "/tmp/dzeck_files"
+os.makedirs(DZECK_FILES_DIR, exist_ok=True)
+
+
+def _make_download_url(file_path: str) -> str:
+    """Generate a download URL for a file accessible via /api/files/download."""
+    filename = os.path.basename(file_path)
+    encoded_path = urllib.parse.quote(file_path, safe="")
+    encoded_name = urllib.parse.quote(filename, safe="")
+    return f"/api/files/download?path={encoded_path}&name={encoded_name}"
+
+
+def _register_file_for_download(file_path: str) -> str:
+    """
+    Copy the file to DZECK_FILES_DIR so it's accessible for download,
+    and return the download URL. Also returns URL for the original path.
+    """
+    try:
+        if os.path.isfile(file_path):
+            filename = os.path.basename(file_path)
+            dest = os.path.join(DZECK_FILES_DIR, filename)
+            # If dest exists with different name, use unique name
+            if os.path.exists(dest) and os.path.abspath(dest) != os.path.abspath(file_path):
+                base, ext = os.path.splitext(filename)
+                import hashlib, time
+                tag = hashlib.md5(str(time.time()).encode()).hexdigest()[:6]
+                filename = f"{base}_{tag}{ext}"
+                dest = os.path.join(DZECK_FILES_DIR, filename)
+            if os.path.abspath(file_path) != os.path.abspath(dest):
+                shutil.copy2(file_path, dest)
+    except Exception:
+        pass
+    return _make_download_url(file_path)
 
 
 # ─── Utility helpers ─────────────────────────────────────────────────────────
@@ -108,10 +146,17 @@ def file_write(
             f.write(write_content)
 
         operation = "appended" if append else "written"
+        download_url = _register_file_for_download(file)
         return ToolResult(
             success=True,
             message=f"File {operation} successfully: {file} ({len(write_content)} bytes)",
-            data={"file": file, "operation": operation, "bytes_written": len(write_content)},
+            data={
+                "file": file,
+                "operation": operation,
+                "bytes_written": len(write_content),
+                "download_url": download_url,
+                "filename": os.path.basename(file),
+            },
         )
     except Exception as e:
         return ToolResult(success=False, message=f"Failed to write file: {str(e)}", data={"error": str(e), "file": file})
@@ -145,10 +190,16 @@ def file_str_replace(
         with open(file, "w", encoding="utf-8") as f:
             f.write(new_content)
 
+        download_url = _register_file_for_download(file)
         return ToolResult(
             success=True,
             message=f"Replaced {count} occurrence(s) in {file}",
-            data={"file": file, "replacements": count},
+            data={
+                "file": file,
+                "replacements": count,
+                "download_url": download_url,
+                "filename": os.path.basename(file),
+            },
         )
     except Exception as e:
         return ToolResult(success=False, message=f"Failed to replace in file: {str(e)}", data={"error": str(e), "file": file})

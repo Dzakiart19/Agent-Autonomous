@@ -22,12 +22,15 @@ You are currently executing a specific step in a larger plan. Your goal is to co
 - Use file_write/file_read for file operations (safer than shell for text)
 - Always notify the user with progress updates during long operations
 - When done, call idle with success=true and a brief result summary
+- CRITICAL: NEVER run GUI programs via shell_exec. Commands like google-chrome, chromium, firefox, xdg-open, gnome-open, vlc, mpv, evince, xterm will FAIL/HANG — the sandbox has NO graphical display. Use browser tools for web navigation instead.
 </step_execution_rules>
 
 <tool_selection_guide>
 - Real-time information (news, prices, weather, current events) → info_search_web
-- Visiting a specific URL → browser_navigate  
-- Running code or system commands → shell_exec
+- Opening/visiting a URL or web page → browser_navigate (NEVER shell google-chrome/xdg-open)
+- Taking a screenshot of a webpage → browser_navigate then browser_view
+- Running code or system commands → shell_exec (text/CLI only, no GUI apps)
+- Installing packages → shell_exec with `pip install` or `apt-get install -y`
 - Creating/reading/modifying files → file_write, file_read, file_str_replace
 - Step can be done from knowledge → message_notify_user with answer, then idle
 - Need user input → message_ask_user

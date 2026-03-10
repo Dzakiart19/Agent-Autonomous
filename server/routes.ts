@@ -1,76 +1,23 @@
 import { createServer, type Server } from "node:http";
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn } from "node:child_process";
 import * as https from "node:https";
-import * as net from "node:net";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { randomUUID } from "node:crypto";
 
-// ─── VNC / Virtual Display Management ────────────────────────────────────────
-const VNC_DISPLAY = ":99";
-const VNC_RFB_PORT = 5910;
-const VNC_WS_PORT = 6081;
-
-let _xvfbProc: ChildProcess | null = null;
-let _x11vncProc: ChildProcess | null = null;
-let _websockifyProc: ChildProcess | null = null;
-let _vncReady = false;
-
-function startVNCStack() {
-  console.log("[VNC] Starting virtual display stack...");
-
-  _xvfbProc = spawn("Xvfb", [VNC_DISPLAY, "-screen", "0", "1280x720x24", "-nolisten", "tcp"], {
-    stdio: "ignore",
-    detached: false,
-  });
-  _xvfbProc.on("error", (e: Error) => console.warn("[VNC] Xvfb error:", e.message));
-
-  setTimeout(() => {
-    _x11vncProc = spawn("x11vnc", [
-      "-display", VNC_DISPLAY,
-      "-nopw", "-listen", "localhost",
-      "-rfbport", String(VNC_RFB_PORT),
-      "-forever", "-quiet", "-noxdamage", "-shared",
-    ], { stdio: "ignore", detached: false });
-    _x11vncProc.on("error", (e: Error) => console.warn("[VNC] x11vnc error:", e.message));
-
-    setTimeout(() => {
-      _websockifyProc = spawn("python3", [
-        "-m", "websockify",
-        "--heartbeat", "30",
-        `0.0.0.0:${VNC_WS_PORT}`,
-        `localhost:${VNC_RFB_PORT}`,
-      ], { stdio: "ignore", detached: false });
-      _websockifyProc.on("error", (e: Error) => console.warn("[VNC] websockify error:", e.message));
-      _vncReady = true;
-      console.log(`[VNC] Stack ready → display=${VNC_DISPLAY} ws=:${VNC_WS_PORT}`);
-    }, 2500);
-  }, 1500);
+// ─── File Download Store ─────────────────────────────────────────────────────
+const DZECK_FILES_DIR = "/tmp/dzeck_files";
+if (!fs.existsSync(DZECK_FILES_DIR)) {
+  fs.mkdirSync(DZECK_FILES_DIR, { recursive: true });
 }
 
-function stopVNCStack() {
-  [_websockifyProc, _x11vncProc, _xvfbProc].forEach(p => { try { p?.kill(); } catch {} });
-}
+// ─── E2B Cloud Sandbox (replaces VNC) ────────────────────────────────────────
+const E2B_ENABLED = !!process.env.E2B_API_KEY;
 
-// Properly forward WebSocket upgrade to local websockify
-function proxyVNCUpgrade(req: any, socket: net.Socket, head: Buffer) {
-  const target = net.connect(VNC_WS_PORT, "127.0.0.1");
-
-  target.on("connect", () => {
-    // Re-send the original HTTP upgrade request to websockify
-    const headerLines = [`GET / HTTP/1.1`];
-    for (const [k, v] of Object.entries(req.headers)) {
-      headerLines.push(`${k}: ${v}`);
-    }
-    headerLines.push("", "");
-    target.write(headerLines.join("\r\n"));
-    if (head && head.length > 0) target.write(head);
-  });
-
-  target.on("error", () => { try { socket.destroy(); } catch {} });
-  socket.on("error", () => { try { target.destroy(); } catch {} });
-
-  // Bidirectional pipe after handshake
-  target.pipe(socket);
-  socket.pipe(target);
+if (E2B_ENABLED) {
+  console.log("[E2B] Cloud sandbox mode enabled. Browser/shell tools run in isolated E2B environment.");
+} else {
+  console.warn("[E2B] E2B_API_KEY not set. Using local fallback for browser/shell tools.");
 }
 
 function getCFConfig() {
@@ -97,14 +44,12 @@ export async function registerRoutes(app: any): Promise<Server> {
     console.warn("[WARNING] CF_API_KEY is not set. AI features will not work.");
   }
 
-  startVNCStack();
-
   app.get("/status", (_req: any, res: any) => {
     res.json({ status: "ok", timestamp: new Date().toISOString() });
   });
 
   app.get("/api/status", (_req: any, res: any) => {
-    res.json({ status: "ok", timestamp: new Date().toISOString(), vncReady: _vncReady });
+    res.json({ status: "ok", timestamp: new Date().toISOString(), e2bEnabled: E2B_ENABLED });
   });
 
   // ─── Chat endpoint ─────────────────────────────────────────────────────────
@@ -179,7 +124,6 @@ export async function registerRoutes(app: any): Promise<Server> {
         CF_AGENT_MODEL: agentModel,
         PYTHONPATH: process.cwd(),
         PYTHONUNBUFFERED: "1",
-        DISPLAY: VNC_DISPLAY,
       },
     });
 
@@ -196,7 +140,7 @@ export async function registerRoutes(app: any): Promise<Server> {
     let buf = "";
     let doneSent = false;
 
-    res.write(`data: ${JSON.stringify({ type: "session", session_id: sid, vnc_ws_port: VNC_WS_PORT })}\n\n`);
+    res.write(`data: ${JSON.stringify({ type: "session", session_id: sid, e2b_enabled: E2B_ENABLED })}\n\n`);
 
     proc.stdout.on("data", (data: Buffer) => {
       buf += data.toString();
@@ -233,24 +177,142 @@ export async function registerRoutes(app: any): Promise<Server> {
   });
 
   app.get("/api/test", (_req: any, res: any) => {
-    res.json({ message: "API is working", timestamp: new Date().toISOString(), cloudflareConfigured: !!startupCfg.apiKey, vncReady: _vncReady });
+    res.json({
+      message: "API is working",
+      timestamp: new Date().toISOString(),
+      cloudflareConfigured: !!startupCfg.apiKey,
+      e2bEnabled: E2B_ENABLED,
+    });
+  });
+
+  // ─── File Download endpoint ─────────────────────────────────────────────────
+  // Serves files created by the AI agent (file_write, shell_exec output, etc.)
+  // Supports all file types: zip, pdf, py, js, mp4, mp3, docx, xlsx, etc.
+  app.get("/api/files/download", (req: any, res: any) => {
+    const rawPath = req.query.path as string;
+    const rawName = req.query.name as string;
+
+    if (!rawPath) {
+      return res.status(400).json({ error: "path is required" });
+    }
+
+    // Decode path
+    let filePath: string;
+    try {
+      filePath = decodeURIComponent(rawPath);
+    } catch {
+      return res.status(400).json({ error: "invalid path encoding" });
+    }
+
+    // Security: only allow files in /tmp/, /home/, or project workspace
+    const allowed = ["/tmp/", "/home/", process.cwd()];
+    const isAllowed = allowed.some(prefix => filePath.startsWith(prefix));
+    if (!isAllowed) {
+      return res.status(403).json({ error: "access denied: path not allowed" });
+    }
+
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ error: `File not found: ${filePath}` });
+    }
+
+    const stat = fs.statSync(filePath);
+    if (!stat.isFile()) {
+      return res.status(400).json({ error: "path is not a file" });
+    }
+
+    const fileName = rawName ? decodeURIComponent(rawName) : path.basename(filePath);
+    const ext = path.extname(fileName).toLowerCase().slice(1);
+
+    // MIME type map for common file types
+    const MIME: Record<string, string> = {
+      // Archives
+      zip: "application/zip", rar: "application/x-rar-compressed",
+      "7z": "application/x-7z-compressed", tar: "application/x-tar",
+      gz: "application/gzip", bz2: "application/x-bzip2", xz: "application/x-xz",
+      iso: "application/x-iso9660-image",
+      // Documents
+      pdf: "application/pdf",
+      doc: "application/msword",
+      docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      xls: "application/vnd.ms-excel",
+      xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      odt: "application/vnd.oasis.opendocument.text",
+      ods: "application/vnd.oasis.opendocument.spreadsheet",
+      txt: "text/plain", md: "text/markdown", rtf: "application/rtf",
+      csv: "text/csv", tsv: "text/tab-separated-values",
+      // Data
+      json: "application/json", xml: "application/xml",
+      yaml: "application/x-yaml", yml: "application/x-yaml",
+      toml: "application/toml", ini: "text/plain",
+      sql: "application/sql", db: "application/x-sqlite3",
+      sqlite: "application/x-sqlite3", sqlite3: "application/x-sqlite3",
+      // Images
+      jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png",
+      gif: "image/gif", bmp: "image/bmp", webp: "image/webp",
+      svg: "image/svg+xml", ico: "image/x-icon",
+      // Video
+      mp4: "video/mp4", mkv: "video/x-matroska", avi: "video/x-msvideo",
+      mov: "video/quicktime", webm: "video/webm", flv: "video/x-flv",
+      // Audio
+      mp3: "audio/mpeg", wav: "audio/wav", ogg: "audio/ogg",
+      aac: "audio/aac", flac: "audio/flac", m4a: "audio/mp4",
+      // Code
+      py: "text/x-python", js: "text/javascript", ts: "text/typescript",
+      tsx: "text/typescript", jsx: "text/javascript", html: "text/html",
+      htm: "text/html", css: "text/css", sh: "text/x-shellscript",
+      bash: "text/x-shellscript", java: "text/x-java-source",
+      cpp: "text/x-c", c: "text/x-c", go: "text/x-go",
+      rs: "text/x-rust", rb: "text/x-ruby", php: "text/x-php",
+      // Binary
+      exe: "application/x-msdownload", msi: "application/x-msinstaller",
+      apk: "application/vnd.android.package-archive",
+      deb: "application/x-debian-package", rpm: "application/x-rpm",
+      wasm: "application/wasm",
+    };
+
+    const mimeType = MIME[ext] || "application/octet-stream";
+    const fileSize = stat.size;
+
+    res.setHeader("Content-Type", mimeType);
+    res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
+    res.setHeader("Content-Length", fileSize);
+    res.setHeader("Cache-Control", "no-cache");
+
+    const stream = fs.createReadStream(filePath);
+    stream.on("error", (err) => {
+      console.error("[FileDownload] Stream error:", err);
+      if (!res.headersSent) res.status(500).json({ error: "Failed to stream file" });
+    });
+    stream.pipe(res);
+  });
+
+  // ─── File list endpoint (files created by AI) ───────────────────────────────
+  app.get("/api/files/list", (_req: any, res: any) => {
+    try {
+      if (!fs.existsSync(DZECK_FILES_DIR)) {
+        return res.json({ files: [] });
+      }
+      const files = fs.readdirSync(DZECK_FILES_DIR).map(name => {
+        const full = path.join(DZECK_FILES_DIR, name);
+        const stat = fs.statSync(full);
+        return {
+          name,
+          size: stat.size,
+          created: stat.birthtime,
+          download_url: `/api/files/download?path=${encodeURIComponent(full)}&name=${encodeURIComponent(name)}`,
+        };
+      });
+      res.json({ files });
+    } catch (e) {
+      res.json({ files: [] });
+    }
   });
 
   const httpServer = createServer(app);
 
-  // WebSocket upgrade → proxy to local websockify/VNC
-  httpServer.on("upgrade", (req, socket, head) => {
-    const url = req.url || "";
-    if (url === "/vnc-ws" || url.startsWith("/vnc-ws?")) {
-      proxyVNCUpgrade(req, socket as net.Socket, head);
-    } else {
-      (socket as net.Socket).destroy();
-    }
+  httpServer.on("upgrade", (_req, socket) => {
+    socket.destroy();
   });
-
-  process.on("exit", stopVNCStack);
-  process.on("SIGINT", () => { stopVNCStack(); process.exit(0); });
-  process.on("SIGTERM", () => { stopVNCStack(); process.exit(0); });
 
   return httpServer;
 }
