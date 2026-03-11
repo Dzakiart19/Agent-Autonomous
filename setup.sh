@@ -43,7 +43,7 @@ for bin in Xvfb x11vnc fluxbox xsetroot xdpyinfo feh; do
   if command -v "$bin" &>/dev/null; then
     print_ok "$bin found: $(which $bin)"
   else
-    print_warn "$bin not found — add to replit.nix: pkgs.xorg.xsetroot, pkgs.xorg.xdpyinfo, pkgs.fluxbox, pkgs.feh"
+    print_warn "$bin not found — add to replit.nix"
     VNC_PKGS_OK=false
   fi
 done
@@ -104,15 +104,21 @@ done
 print_step "Installing Playwright browser (Chromium)..."
 if $PYTHON -m playwright install chromium --quiet 2>&1; then
   print_ok "Playwright Chromium ready"
-  CHROME_BIN=$(find "$PROJECT_ROOT/.cache/ms-playwright" -name "chrome" -type f 2>/dev/null | head -1)
+  CHROME_BIN=""
+  for search_dir in "chrome-linux64" "chrome-linux"; do
+    CHROME_BIN=$(find "$PROJECT_ROOT/.cache/ms-playwright" -path "*/$search_dir/chrome" -type f 2>/dev/null | head -1)
+    if [ -n "$CHROME_BIN" ]; then break; fi
+  done
   if [ -n "$CHROME_BIN" ]; then
     print_ok "Chrome binary: $CHROME_BIN"
+  else
+    print_warn "Chrome binary not found in .cache/ms-playwright — server will auto-detect at runtime"
   fi
 else
   print_warn "Run manually: python3 -m playwright install chromium"
 fi
 
-# ─── Fluxbox kiosk config ────────────────────────────────────────────────────
+# ─── Fluxbox kiosk config (MouseFocus + no decorations) ────────────────────
 print_step "Configuring Fluxbox window manager (kiosk mode)..."
 FBDIR="$HOME/.fluxbox"
 mkdir -p "$FBDIR"
@@ -126,6 +132,9 @@ session.screen0.workspaces: 1
 session.screen0.window.focus.alpha: 255
 session.screen0.window.unfocus.alpha: 255
 session.screen0.tabs.usePixmap: false
+session.screen0.focusModel: MouseFocus
+session.screen0.autoRaise: true
+session.screen0.clickRaises: true
 session.styleFile: /dev/null
 EOF
 cat > "$FBDIR/apps" <<'EOF'
@@ -136,7 +145,7 @@ cat > "$FBDIR/apps" <<'EOF'
   [Position] {0 0}
 [end]
 EOF
-print_ok "Fluxbox configured: no toolbar, no decorations, all windows maximized"
+print_ok "Fluxbox configured: MouseFocus, no toolbar, no decorations, all windows maximized"
 
 # ─── E2B Sandbox check ────────────────────────────────────────────────────────
 print_step "Checking E2B cloud sandbox..."
@@ -191,6 +200,11 @@ else
   print_ok ".env file exists"
 fi
 
+# ─── Cleanup stale pycache ────────────────────────────────────────────────────
+print_step "Cleaning stale __pycache__..."
+find "$PROJECT_ROOT/server/agent" -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+print_ok "Python cache cleaned"
+
 # ─── Architecture summary ────────────────────────────────────────────────────
 echo ""
 echo -e "${CYAN}${BOLD}╔══════════════════════════════════════════════════════════════╗${NC}"
@@ -205,8 +219,9 @@ echo -e "${CYAN}${BOLD}║               /home/user/dzeck-ai/output/ (deliverabl
 echo -e "${CYAN}${BOLD}║  Search      → DuckDuckGo (no API key needed)               ║${NC}"
 echo -e "${CYAN}${BOLD}║  MCP         → Cloudflare MCP (OAuth token required)         ║${NC}"
 echo -e "${CYAN}${BOLD}╠══════════════════════════════════════════════════════════════╣${NC}"
-echo -e "${CYAN}${BOLD}║  VNC Stack   → Xvfb :10 → Fluxbox → x11vnc :5910 → /vnc-ws  ║${NC}"
-echo -e "${CYAN}${BOLD}║  CDP         → Chromium --remote-debugging-port=9222         ║${NC}"
+echo -e "${CYAN}${BOLD}║  VNC Stack   → Xvfb :10 → Fluxbox (MouseFocus) → x11vnc     ║${NC}"
+echo -e "${CYAN}${BOLD}║               x11vnc :5910 (-xkb -noxrecord -noxfixes)       ║${NC}"
+echo -e "${CYAN}${BOLD}║  CDP         → Chromium --kiosk --remote-debugging-port=9222 ║${NC}"
 echo -e "${CYAN}${BOLD}║  Sandbox Pkgs→ reportlab, python-docx, openpyxl, Pillow      ║${NC}"
 echo -e "${CYAN}${BOLD}╚══════════════════════════════════════════════════════════════╝${NC}"
 
