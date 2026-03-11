@@ -19,7 +19,8 @@ print_error() { echo -e "${RED}  ✗ $1${NC}"; }
 echo ""
 echo -e "${CYAN}${BOLD}╔══════════════════════════════════════════╗${NC}"
 echo -e "${CYAN}${BOLD}║     Dzeck AI — Setup & Install           ║${NC}"
-echo -e "${CYAN}${BOLD}║     Model: llama-3.3-70b (tool-calling)  ║${NC}"
+echo -e "${CYAN}${BOLD}║     Agent: llama-3.3-70b (tool-calling)   ║${NC}"
+echo -e "${CYAN}${BOLD}║     Chat:  qwen3-30b-a3b-fp8             ║${NC}"
 echo -e "${CYAN}${BOLD}╚══════════════════════════════════════════╝${NC}"
 echo ""
 
@@ -56,8 +57,8 @@ cd "$PROJECT_ROOT"
 npm install --no-audit --prefer-offline 2>&1 | grep -E "added|updated|packages" | head -3 || true
 print_ok "Node.js packages ready"
 
-# ─── Python packages ──────────────────────────────────────────────────────────
-print_step "Installing Python packages..."
+# ─── Python packages (host — agent core) ────────────────────────────────────
+print_step "Installing Python packages (host agent)..."
 
 PIP_FLAGS=""
 if $PYTHON -m pip install --help 2>&1 | grep -q 'break-system'; then
@@ -67,7 +68,12 @@ fi
 PYTHON_PACKAGES=(
   "pydantic>=2.0.0"
   "playwright>=1.40.0"
-  "e2b>=0.17.0"
+  "e2b>=1.0.0"
+  "httpx>=0.24.0"
+  "requests>=2.28.0"
+)
+
+PYTHON_PACKAGES_OPTIONAL=(
   "redis>=5.0.0"
   "motor>=3.7.0"
 )
@@ -78,14 +84,30 @@ for pkg in "${PYTHON_PACKAGES[@]}"; do
   if $PYTHON -m pip install $PIP_FLAGS "$pkg" -q 2>&1; then
     print_ok "$pkg_name ready"
   else
-    print_warn "$pkg_name install failed — may need manual install"
+    print_error "$pkg_name install FAILED — required for agent"
+  fi
+done
+
+echo ""
+print_step "Installing optional Python packages..."
+for pkg in "${PYTHON_PACKAGES_OPTIONAL[@]}"; do
+  pkg_name="${pkg%%[>=<]*}"
+  echo -n "  Checking $pkg_name..."
+  if $PYTHON -m pip install $PIP_FLAGS "$pkg" -q 2>&1; then
+    print_ok "$pkg_name ready (optional: cache/sessions)"
+  else
+    print_warn "$pkg_name not installed — agent works without it"
   fi
 done
 
 # ─── Playwright browser ───────────────────────────────────────────────────────
 print_step "Installing Playwright browser (Chromium)..."
 if $PYTHON -m playwright install chromium --quiet 2>&1; then
-  print_ok "Playwright Chromium ready (VNC display + screenshots)"
+  print_ok "Playwright Chromium ready"
+  CHROME_BIN=$(find "$PROJECT_ROOT/.cache/ms-playwright" -name "chrome" -type f 2>/dev/null | head -1)
+  if [ -n "$CHROME_BIN" ]; then
+    print_ok "Chrome binary: $CHROME_BIN"
+  fi
 else
   print_warn "Run manually: python3 -m playwright install chromium"
 fi
@@ -119,17 +141,17 @@ print_ok "Fluxbox configured: no toolbar, no decorations, all windows maximized"
 # ─── E2B Sandbox check ────────────────────────────────────────────────────────
 print_step "Checking E2B cloud sandbox..."
 if [ -n "${E2B_API_KEY:-}" ]; then
-  print_ok "E2B_API_KEY is set — cloud sandbox enabled (shell/code tools)"
+  print_ok "E2B_API_KEY is set — cloud sandbox enabled"
+  echo -e "    ${CYAN}Sandbox auto-installs: reportlab, python-docx, openpyxl, Pillow${NC}"
 else
   print_warn "E2B_API_KEY not set — shell/code tools will run locally"
   print_warn "Set via: export E2B_API_KEY=your-key (or add to Replit Secrets)"
 fi
 
 # ─── Dzeck files directory ────────────────────────────────────────────────────
-print_step "Creating Dzeck file store directory..."
+print_step "Creating runtime directories..."
 mkdir -p /tmp/dzeck_files
 mkdir -p /tmp/dzeck_files/uploads
-mkdir -p /tmp/dzeck_chrome_profile
 print_ok "/tmp/dzeck_files ready (downloadable files stored here)"
 
 # ─── .env file ────────────────────────────────────────────────────────────────
@@ -169,19 +191,23 @@ else
   print_ok ".env file exists"
 fi
 
-# ─── Tool routing summary ─────────────────────────────────────────────────────
+# ─── Architecture summary ────────────────────────────────────────────────────
 echo ""
 echo -e "${CYAN}${BOLD}╔══════════════════════════════════════════════════════════════╗${NC}"
-echo -e "${CYAN}${BOLD}║  Routing Cerdas — Tool Dispatch Logic                        ║${NC}"
+echo -e "${CYAN}${BOLD}║  Architecture — Tool Dispatch & Runtime                      ║${NC}"
 echo -e "${CYAN}${BOLD}╠══════════════════════════════════════════════════════════════╣${NC}"
-echo -e "${CYAN}${BOLD}║  Browser     → Playwright on VNC display :10 (visible LIVE)  ║${NC}"
-echo -e "${CYAN}${BOLD}║  Shell/Code  → E2B cloud sandbox (terisolasi, aman)          ║${NC}"
-echo -e "${CYAN}${BOLD}║  File I/O    → Local /tmp/dzeck_files                        ║${NC}"
-echo -e "${CYAN}${BOLD}║  Search      → DuckDuckGo (bebas API key)                    ║${NC}"
+echo -e "${CYAN}${BOLD}║  Browser     → Persistent Chromium (CDP port 9222) on VNC    ║${NC}"
+echo -e "${CYAN}${BOLD}║               Agent connects via connect_over_cdp()          ║${NC}"
+echo -e "${CYAN}${BOLD}║               Browser stays visible after agent finishes     ║${NC}"
+echo -e "${CYAN}${BOLD}║  Shell/Code  → E2B cloud sandbox (isolated, safe)            ║${NC}"
+echo -e "${CYAN}${BOLD}║  File I/O    → /home/user/dzeck-ai/ (workspace, no download) ║${NC}"
+echo -e "${CYAN}${BOLD}║               /home/user/dzeck-ai/output/ (deliverables, DL) ║${NC}"
+echo -e "${CYAN}${BOLD}║  Search      → DuckDuckGo (no API key needed)               ║${NC}"
 echo -e "${CYAN}${BOLD}║  MCP         → Cloudflare MCP (OAuth token required)         ║${NC}"
 echo -e "${CYAN}${BOLD}╠══════════════════════════════════════════════════════════════╣${NC}"
 echo -e "${CYAN}${BOLD}║  VNC Stack   → Xvfb :10 → Fluxbox → x11vnc :5910 → /vnc-ws  ║${NC}"
-echo -e "${CYAN}${BOLD}║  Mobile UI   → Keyboard, Clipboard, Esc/Tab/F5 toolbar       ║${NC}"
+echo -e "${CYAN}${BOLD}║  CDP         → Chromium --remote-debugging-port=9222         ║${NC}"
+echo -e "${CYAN}${BOLD}║  Sandbox Pkgs→ reportlab, python-docx, openpyxl, Pillow      ║${NC}"
 echo -e "${CYAN}${BOLD}╚══════════════════════════════════════════════════════════════╝${NC}"
 
 # ─── Done ─────────────────────────────────────────────────────────────────────
@@ -194,9 +220,15 @@ echo -e "  ${BOLD}Mulai server:${NC}"
 echo -e "    ${CYAN}npm run server:dev${NC}     → http://localhost:5000"
 echo ""
 echo -e "  ${BOLD}Model AI aktif:${NC}"
-echo -e "    ${GREEN}Chat: @cf/qwen/qwen3-30b-a3b-fp8${NC}"
+echo -e "    ${GREEN}Chat:  @cf/qwen/qwen3-30b-a3b-fp8${NC}"
 echo -e "    ${GREEN}Agent: @cf/meta/llama-3.3-70b-instruct-fp8-fast${NC}"
-echo -e "    ${CYAN}✓ Native tool calling verified${NC}"
+echo ""
+echo -e "  ${BOLD}Python host deps:${NC}"
+echo -e "    ${CYAN}pydantic, playwright, e2b, httpx, requests${NC}"
+echo -e "    ${CYAN}Optional: redis (cache), motor (sessions)${NC}"
+echo ""
+echo -e "  ${BOLD}E2B sandbox deps (auto-installed):${NC}"
+echo -e "    ${CYAN}reportlab, python-docx, openpyxl, Pillow${NC}"
 echo ""
 echo -e "  ${BOLD}Konfigurasi:${NC}"
 echo -e "    Edit ${CYAN}.env${NC} → CF_API_KEY, CF_ACCOUNT_ID, CF_GATEWAY_NAME, E2B_API_KEY"

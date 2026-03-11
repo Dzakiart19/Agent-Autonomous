@@ -138,6 +138,8 @@ export async function registerRoutes(app: any): Promise<Server> {
     const sid = session_id || randomUUID();
 
     vncTouch();
+    // Ensure VNC+CDP are running before spawning agent (fixes idle-restart gap)
+    ensureVncRunning().catch(() => {});
     const proc = spawn("python3", ["-u", "-m", "server.agent.agent_flow"], {
       stdio: ["pipe", "pipe", "pipe"],
       cwd: process.cwd(),
@@ -150,6 +152,7 @@ export async function registerRoutes(app: any): Promise<Server> {
         DISPLAY: process.env.DISPLAY || ":10",
         DZECK_VNC_DISPLAY: process.env.DZECK_VNC_DISPLAY || ":10",
         DZECK_SESSION_ID: sid,
+        DZECK_CDP_URL: process.env.DZECK_CDP_URL || "",
       },
     });
 
@@ -399,6 +402,8 @@ export async function registerRoutes(app: any): Promise<Server> {
   const VNC_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
   let _vncLastActivity = Date.now();
   let _vncIdleTimer: ReturnType<typeof setTimeout> | null = null;
+  let _chromiumProc: any = null;
+  const CDP_PORT = 9222;
 
   function vncTouch() {
     _vncLastActivity = Date.now();
@@ -412,13 +417,22 @@ export async function registerRoutes(app: any): Promise<Server> {
   }
 
   function stopVnc() {
+    if (_chromiumProc) {
+      try { _chromiumProc.kill("SIGTERM"); } catch {}
+      _chromiumProc = null;
+    }
     for (const p of _vncProcs) {
       try { p.kill("SIGTERM"); } catch {}
     }
     _vncProcs.length = 0;
     _vncStarted = false;
     if (_vncIdleTimer) { clearTimeout(_vncIdleTimer); _vncIdleTimer = null; }
-    console.log("[VNC] Display stopped");
+    try {
+      const { execSync } = require("node:child_process");
+      execSync("pkill -f 'chromium.*--remote-debugging-port' 2>/dev/null; true", { timeout: 3000 });
+    } catch {}
+    delete process.env.DZECK_CDP_URL;
+    console.log("[VNC] Display stopped (including persistent Chromium)");
   }
 
   // Set DISPLAY early so agent/browser requests never start headless
@@ -486,7 +500,7 @@ export async function registerRoutes(app: any): Promise<Server> {
       const xsetroot = findBin("xsetroot", "");
       if (xsetroot) {
         try {
-          spawnProc(xsetroot, ["-solid", "#1a1a2e"], {
+          spawnProc(xsetroot, ["-solid", "#2d2d44"], {
             detached: false, stdio: "ignore",
             env: { ...process.env, DISPLAY: VNC_DISPLAY },
           });
@@ -554,10 +568,59 @@ export async function registerRoutes(app: any): Promise<Server> {
         } catch {}
       }
 
-      // 6. No standalone Chromium launched here — the Playwright agent browser
-      // will appear on the VNC display when the AI agent runs browser actions.
-      // This ensures the user sees the ACTUAL agent browsing, not a static page.
-      console.log("[VNC] Display ready — agent browser will appear here when working");
+      // 6. Launch persistent Chromium with CDP for agent to connect to
+      // This browser is managed by Node.js server — survives agent process exits
+      try {
+        // Find Playwright's bundled Chromium
+        const globSync = require("node:fs").readdirSync;
+        const pwCacheBase = path.join(process.cwd(), ".cache", "ms-playwright");
+        let chromiumExe = "";
+        try {
+          const dirs = fs.readdirSync(pwCacheBase).filter((d: string) => d.startsWith("chromium-")).sort().reverse();
+          for (const d of dirs) {
+            const candidate = path.join(pwCacheBase, d, "chrome-linux64", "chrome");
+            if (fs.existsSync(candidate)) { chromiumExe = candidate; break; }
+            const candidate2 = path.join(pwCacheBase, d, "chrome-linux", "chrome");
+            if (fs.existsSync(candidate2)) { chromiumExe = candidate2; break; }
+          }
+        } catch {}
+        if (!chromiumExe) {
+          try { chromiumExe = execSync("which chromium 2>/dev/null || which google-chrome 2>/dev/null || which chromium-browser 2>/dev/null", { encoding: "utf-8", timeout: 2000 }).trim(); } catch {}
+        }
+
+        if (chromiumExe) {
+          // Kill any existing Chromium first
+          try { execSync("pkill -f 'chromium.*--remote-debugging-port' 2>/dev/null; true", { timeout: 3000 }); } catch {}
+          await new Promise(r => setTimeout(r, 500));
+
+          _chromiumProc = spawnProc(chromiumExe, [
+            "--no-sandbox", "--disable-dev-shm-usage", "--disable-setuid-sandbox",
+            "--disable-gpu", "--disable-software-rasterizer",
+            "--disable-extensions",
+            "--disable-background-timer-throttling",
+            "--disable-backgrounding-occluded-windows",
+            "--disable-renderer-backgrounding",
+            "--window-size=1280,720", "--window-position=0,0",
+            "--start-maximized",
+            `--remote-debugging-port=${CDP_PORT}`,
+            "--remote-debugging-address=127.0.0.1",
+            `--user-data-dir=/tmp/dzeck-chrome-data-${Date.now()}`,
+            "about:blank",
+          ], {
+            detached: true,
+            stdio: "ignore",
+            env: { ...process.env, DISPLAY: VNC_DISPLAY },
+          });
+          _chromiumProc.unref();
+          await new Promise(r => setTimeout(r, 2000));
+          process.env.DZECK_CDP_URL = `http://127.0.0.1:${CDP_PORT}`;
+          console.log(`[VNC] Persistent Chromium launched (CDP port ${CDP_PORT}, exe: ${chromiumExe})`);
+        } else {
+          console.warn("[VNC] No Chromium binary found — browser will launch per-agent-session");
+        }
+      } catch (chrErr: any) {
+        console.warn("[VNC] Failed to launch persistent Chromium:", chrErr?.message);
+      }
 
       _vncStarted = true;
       _vncStarting = false;

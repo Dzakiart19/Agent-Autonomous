@@ -1458,8 +1458,12 @@ async function connectVNC() {
     });
     S.rfb.scaleViewport = true;
     S.rfb.resizeSession = false;
+    S.rfb.clipViewport = false;
     S.rfb.viewOnly = !S.isTakeover;
     S.rfb.showDotCursor = true;
+    S.rfb.focusOnClick = true;
+    S.rfb.qualityLevel = 6;
+    S.rfb.compressionLevel = 2;
 
     vncCont.style.display = 'none';
     let connected = false;

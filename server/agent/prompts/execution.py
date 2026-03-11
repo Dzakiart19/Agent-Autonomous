@@ -57,7 +57,11 @@ ATURAN PEMILIHAN TOOL (WAJIB DIPATUHI — jangan langgar ini):
 LARANGAN ABSOLUT:
 - JANGAN PERNAH gunakan shell_exec untuk: curl URL, wget URL, python requests ke URL web,
   google-chrome, chromium, firefox, xdg-open, atau membuka browser via shell
+- JANGAN PERNAH jalankan program GUI via shell_exec: xterm, gnome-terminal, konsole, xfce4-terminal,
+  startx, Xvfb, vlc, mpv, gimp, inkscape, evince, gedit, nautilus, atau program desktop apapun.
+  Sandbox adalah HEADLESS (tanpa display/layar). Semua program GUI akan GAGAL.
 - Shell_exec HANYA untuk: kode Python/script, terminal commands, install package, operasi file system
+- Untuk browsing web: SELALU gunakan browser_navigate, BUKAN shell
 </tool_selection_guide>
 
 <browser_state>

@@ -73,20 +73,21 @@ def _reset_browser() -> None:
         _browser = _make_session()
 
 
-def _detach_browser_on_exit() -> None:
-    """On process exit, detach from browser instead of killing it.
-    This keeps the Chromium window visible on VNC after agent finishes."""
+def _disconnect_browser_on_exit() -> None:
+    """On process exit, disconnect from CDP browser without killing it.
+    Since we use connect_over_cdp, disconnect just drops the connection
+    while the browser (managed by Node.js server) stays alive."""
     global _browser
-    if _browser is not None and hasattr(_browser, 'detach'):
+    if _browser is not None and hasattr(_browser, 'disconnect'):
         try:
-            _browser.detach()
+            _browser.disconnect()
         except Exception:
             pass
     _browser = None
 
 
 import atexit
-atexit.register(_detach_browser_on_exit)
+atexit.register(_disconnect_browser_on_exit)
 
 
 # ─── E2B Browser Session ────────────────────────────────────────────────────
@@ -253,6 +254,7 @@ class PlaywrightSession:
         self._page: Any = None
         self._started = False
         self._headless = True
+        self._cdp_mode = False
         self.current_url: Optional[str] = None
         self.console_logs: List[str] = []
 
@@ -262,7 +264,37 @@ class PlaywrightSession:
         try:
             from playwright.sync_api import sync_playwright
 
+            cdp_url = os.environ.get("DZECK_CDP_URL", "")
             display = os.environ.get("DISPLAY", "") or os.environ.get("DZECK_VNC_DISPLAY", "")
+
+            self._pw = sync_playwright().start()
+
+            if cdp_url:
+                logger.info("[Browser] Connecting to persistent Chromium via CDP: %s", cdp_url)
+                try:
+                    self._browser = self._pw.chromium.connect_over_cdp(cdp_url)
+                    self._cdp_mode = True
+                    contexts = self._browser.contexts
+                    if contexts:
+                        self._context = contexts[0]
+                        pages = self._context.pages
+                        if pages:
+                            self._page = pages[0]
+                        else:
+                            self._page = self._context.new_page()
+                    else:
+                        self._context = self._browser.new_context(
+                            viewport={"width": 1280, "height": 720},
+                            user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                        )
+                        self._page = self._context.new_page()
+                    self._page.on("console", lambda msg: self.console_logs.append("[{}] {}".format(msg.type, msg.text)))
+                    self._started = True
+                    self._headless = False
+                    logger.info("[Browser] Connected to persistent Chromium via CDP (VNC visible).")
+                    return True
+                except Exception as cdp_err:
+                    logger.warning("[Browser] CDP connection failed: %s — falling back to launch", cdp_err)
 
             if display:
                 self._headless = False
@@ -270,8 +302,6 @@ class PlaywrightSession:
             else:
                 self._headless = True
                 logger.info("[Browser] No DISPLAY found, using headless mode.")
-
-            self._pw = sync_playwright().start()
 
             launch_args = [
                 "--no-sandbox",
@@ -296,8 +326,6 @@ class PlaywrightSession:
             if display:
                 env["DISPLAY"] = display
 
-            # Find executable path — Playwright's bundled chromium may differ from what
-            # 'playwright install' put in place. We check the cache ourselves.
             exe = _find_chromium_executable()
             launch_kwargs: dict = {
                 "headless": self._headless,
@@ -309,10 +337,8 @@ class PlaywrightSession:
             if not self._headless:
                 launch_kwargs["env"] = env
 
-            launch_kwargs["handle_sigterm"] = False
-            launch_kwargs["handle_sighup"] = False
-
             self._browser = self._pw.chromium.launch(**launch_kwargs)
+            self._cdp_mode = False
             self._context = self._browser.new_context(
                 viewport={"width": 1280, "height": 720},
                 user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -430,11 +456,14 @@ class PlaywrightSession:
         except Exception as e:
             return ToolResult(success=False, message="Save screenshot failed: {}".format(e))
 
-    def detach(self) -> None:
-        """Detach from the browser without closing it — keeps Chromium visible on VNC.
-        We intentionally do NOT call self._pw.stop() or self._browser.close()
-        because that would kill the Chromium process. Instead we just drop
-        Python references so the process exits cleanly without teardown."""
+    def disconnect(self) -> None:
+        """Disconnect from CDP browser without killing it.
+        Browser stays visible on VNC. For non-CDP mode, just drops references."""
+        try:
+            if self._pw:
+                self._pw.stop()
+        except Exception:
+            pass
         self._page = None
         self._context = None
         self._browser = None
@@ -442,14 +471,17 @@ class PlaywrightSession:
         self._started = False
 
     def close(self) -> None:
-        try:
-            if self._browser:
-                self._browser.close()
-            if self._pw:
-                self._pw.stop()
-        except Exception:
-            pass
-        self._started = False
+        if getattr(self, '_cdp_mode', False):
+            self.disconnect()
+        else:
+            try:
+                if self._browser:
+                    self._browser.close()
+                if self._pw:
+                    self._pw.stop()
+            except Exception:
+                pass
+            self._started = False
 
 
 # ─── HTTP Fallback Session ─────────────────────────────────────────────────────
