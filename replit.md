@@ -29,10 +29,16 @@ Dzeck AI is a cross-platform application built with Expo (React Native) and Node
 - **Database:** MongoDB Atlas for session and agent persistence.
 - **Cache:** Redis for session state caching.
 - **Browser Automation:** Playwright (non-headless) running on a VNC display for live interaction, with HTTP fallback.
-- **Shell Sandbox:** E2B Cloud Sandbox for isolated and secure code execution, with a 600s timeout and keepalive. The workspace is `/home/user/dzeck-ai/`.
+- **Shell Sandbox:** E2B Cloud Sandbox for isolated and secure code execution, with 900s timeout, 3-attempt retry, auto-recovery, and keepalive. The workspace is `/home/user/dzeck-ai/` with output in `/home/user/dzeck-ai/output/`. Pre-installed packages include reportlab, python-docx, openpyxl, Pillow, yt-dlp, pandas, matplotlib.
 - **System Design:** Domain-Driven Design (DDD) with clear separation of Domain, Application, and Infrastructure layers.
 - **Session Management:** Full session resume and rollback support.
 - **Tooling:** Class-based tools implemented with a `BaseTool` pattern and `@tool` decorator.
+
+**Branding:**
+- **Logo:** Dzeck AI logo (`assets/images/icon.png`) - new logo applied to all icons (favicon, Android adaptive icon, splash icon).
+- **Transparent Logo:** `assets/images/dzeck-logo-transparent.png` - PNG with alpha channel, used for splash screens.
+- **Splash Screen (Web):** Full-screen dark splash (#0a0a0c) in `web-chat.html` shows transparent logo (inverted white) with animated dots, auto-hides after 1.2s.
+- **Splash Screen (Native):** Custom `SplashLoader` component in `app/_layout.tsx` shows during font loading with animated logo and dots.
 
 **UI/UX and Web Chat Features:**
 - **Manus-style Web UI:** Redesigned `server/templates/web-chat.html` for a Manus-like interface.

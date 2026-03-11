@@ -70,6 +70,15 @@ LARANGAN ABSOLUT:
   Sandbox adalah HEADLESS (tanpa display/layar). Semua program GUI akan GAGAL.
 - Shell_exec / shell_wait HANYA untuk: kode Python/script, terminal commands, install package, operasi file system
 - Untuk browsing web: SELALU gunakan browser_navigate lalu browser_view, BUKAN shell
+
+ATURAN SERVER/DAEMON (SANGAT PENTING):
+- JANGAN PERNAH jalankan server dengan shell_exec secara blocking: "node server.js", "npm start", "npm run dev",
+  "python -m http.server", "uvicorn", "gunicorn", "flask run" — perintah ini TIDAK PERNAH selesai dan akan TIMEOUT!
+- Jika perlu test sintaks: gunakan "node --check server.js" atau "python3 -m py_compile script.py"
+- Jika perlu test fungsional sederhana: jalankan dengan timeout singkat: "timeout 3 node server.js 2>&1 || true"
+- Untuk membuat project: BUAT semua file, lalu langsung zip — TIDAK perlu menjalankan server!
+- ZIP menggunakan Python: shell_exec("python3 -c \"import zipfile,os; ...\"")
+  atau menggunakan zip command: shell_exec("zip -r output/project.zip src/ package.json README.md")
 </tool_selection_guide>
 
 <browser_state>

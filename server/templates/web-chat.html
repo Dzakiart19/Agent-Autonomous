@@ -7,8 +7,40 @@
   <meta name="mobile-web-app-capable" content="yes"/>
   <meta name="apple-mobile-web-app-capable" content="yes"/>
   <meta name="apple-mobile-web-app-status-bar-style" content="default"/>
-  <meta name="theme-color" content="#edebe3"/>
+  <meta name="theme-color" content="#0a0a0c"/>
   <link rel="icon" type="image/png" href="/assets/images/icon.png"/>
+  <style>
+    /* ── Splash Screen ── */
+    #splash{
+      position:fixed;inset:0;z-index:9999;
+      background:#0a0a0c;
+      display:flex;flex-direction:column;align-items:center;justify-content:center;
+      transition:opacity .5s ease,visibility .5s ease;
+    }
+    #splash.hide{opacity:0;visibility:hidden;pointer-events:none}
+    .splash-logo{
+      width:160px;height:160px;
+      animation:splashPulse 1.8s ease-in-out infinite;
+    }
+    .splash-logo img{width:100%;height:100%;object-fit:contain;filter:brightness(0) invert(1)}
+    .splash-title{
+      margin-top:20px;font-size:22px;font-weight:700;
+      color:#fff;letter-spacing:-.03em;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+    }
+    .splash-sub{
+      margin-top:6px;font-size:12px;color:rgba(255,255,255,.45);
+      font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;letter-spacing:.05em;
+    }
+    .splash-dots{display:flex;gap:7px;margin-top:32px}
+    .splash-dot{
+      width:7px;height:7px;border-radius:50%;background:rgba(255,255,255,.2);
+      animation:splashDot 1.4s ease-in-out infinite;
+    }
+    .splash-dot:nth-child(2){animation-delay:.2s}
+    .splash-dot:nth-child(3){animation-delay:.4s}
+    @keyframes splashPulse{0%,100%{transform:scale(1);opacity:.9}50%{transform:scale(1.05);opacity:1}}
+    @keyframes splashDot{0%,80%,100%{transform:scale(.6);background:rgba(255,255,255,.2)}40%{transform:scale(1);background:rgba(255,255,255,.8)}}
+  </style>
   <style>
     *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
     :root{
@@ -493,6 +525,21 @@
   </style>
 </head>
 <body>
+
+<!-- ═══ SPLASH SCREEN ═══ -->
+<div id="splash">
+  <div class="splash-logo">
+    <img src="/assets/images/dzeck-logo-transparent.png" alt="Dzeck AI" onerror="this.src='/assets/images/icon.png'">
+  </div>
+  <div class="splash-title">Dzeck AI</div>
+  <div class="splash-sub">AUTONOMOUS AI AGENT</div>
+  <div class="splash-dots">
+    <div class="splash-dot"></div>
+    <div class="splash-dot"></div>
+    <div class="splash-dot"></div>
+  </div>
+</div>
+
 <div id="app">
 
   <!-- ═══ SIDEBAR ═══ -->
@@ -2197,6 +2244,15 @@ document.addEventListener('keydown', e=>{ if(e.key==='Escape'){closeScreenshot()
 // ── Init
 renderHistory();
 document.getElementById('welcome-input').focus();
+
+// ── Splash Screen
+(function() {
+  const splash = document.getElementById('splash');
+  if (!splash) return;
+  const hide = () => { splash.classList.add('hide'); setTimeout(() => splash.remove(), 600); };
+  if (document.readyState === 'complete') { setTimeout(hide, 1200); }
+  else { window.addEventListener('load', () => setTimeout(hide, 1200)); }
+})();
 </script>
 </body>
 </html>

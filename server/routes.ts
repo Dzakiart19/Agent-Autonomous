@@ -139,10 +139,9 @@ export async function registerRoutes(app: any): Promise<Server> {
 
     vncTouch();
 
-    const vncOk = await ensureVncRunning().catch(() => false);
-    if (!vncOk) {
+    ensureVncRunning().catch(() => {
       console.warn("[Agent] VNC startup failed — agent will attempt CDP probe fallback");
-    }
+    });
 
     const proc = spawn("python3", ["-u", "-m", "server.agent.agent_flow"], {
       stdio: ["pipe", "pipe", "pipe"],

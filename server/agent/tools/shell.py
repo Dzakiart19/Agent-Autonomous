@@ -176,6 +176,60 @@ def _is_gui_command(command: str) -> Optional[str]:
     return None
 
 
+def _sync_e2b_output_file(file_path: str) -> str:
+    """
+    Transfer a file from E2B sandbox to local server and register it for download.
+    Returns download_url string, or '' if failed.
+    """
+    try:
+        import urllib.parse, shutil, hashlib, time as _time
+        from server.agent.tools.e2b_sandbox import read_file_bytes
+
+        data = read_file_bytes(file_path)
+        if not data:
+            return ""
+
+        session_id = os.environ.get("DZECK_SESSION_ID", "")
+        if session_id:
+            local_dir = f"/tmp/dzeck_files/{session_id}"
+        else:
+            local_dir = "/tmp/dzeck_files"
+        os.makedirs(local_dir, exist_ok=True)
+
+        filename = os.path.basename(file_path)
+        dest = os.path.join(local_dir, filename)
+        if os.path.exists(dest):
+            base, ext = os.path.splitext(filename)
+            tag = hashlib.md5(str(_time.time()).encode()).hexdigest()[:6]
+            filename = f"{base}_{tag}{ext}"
+            dest = os.path.join(local_dir, filename)
+
+        with open(dest, "wb") as f:
+            f.write(data)
+
+        encoded_path = urllib.parse.quote(dest, safe="")
+        encoded_name = urllib.parse.quote(filename, safe="")
+        return f"/api/files/download?path={encoded_path}&name={encoded_name}"
+    except Exception as e:
+        return ""
+
+
+def _extract_output_paths_from_command(command: str) -> list:
+    """Scan a shell command for output file paths in /home/user/dzeck-ai/output/."""
+    import re
+    OUTPUT_DIR = "/home/user/dzeck-ai/output/"
+    pattern = r"(/home/user/dzeck-ai/output/[\w.\-/]+)"
+    paths = re.findall(pattern, command)
+    unique = []
+    seen = set()
+    for p in paths:
+        p = p.rstrip("/,;\"'")
+        if p not in seen and "." in os.path.basename(p):
+            unique.append(p)
+            seen.add(p)
+    return unique
+
+
 def shell_exec(command: str, exec_dir: str = "/home/user/dzeck-ai", id: str = "default") -> ToolResult:
     """Execute a shell command. Uses E2B cloud sandbox when available, else local."""
 
@@ -225,17 +279,38 @@ def shell_exec(command: str, exec_dir: str = "/home/user/dzeck-ai", id: str = "d
     sess["command"] = command
 
     backend = "E2B" if E2B_ENABLED else "local"
+
+    # Auto-sync output files from E2B to local server for download
+    synced_files = []
+    if E2B_ENABLED and res.get("success", False):
+        output_paths = _extract_output_paths_from_command(command)
+        for path in output_paths:
+            dl_url = _sync_e2b_output_file(path)
+            if dl_url:
+                synced_files.append({
+                    "path": path,
+                    "filename": os.path.basename(path),
+                    "download_url": dl_url,
+                })
+                combined += f"\n📎 File siap didownload: {os.path.basename(path)}"
+
+    result_data = {
+        "stdout": stdout,
+        "stderr": stderr,
+        "return_code": exit_code,
+        "command": command,
+        "id": id,
+        "backend": backend,
+    }
+    if synced_files:
+        result_data["synced_files"] = synced_files
+        result_data["download_url"] = synced_files[0]["download_url"]
+        result_data["filename"] = synced_files[0]["filename"]
+
     return ToolResult(
         success=res.get("success", False),
         message=combined,
-        data={
-            "stdout": stdout,
-            "stderr": stderr,
-            "return_code": exit_code,
-            "command": command,
-            "id": id,
-            "backend": backend,
-        },
+        data=result_data,
     )
 
 
