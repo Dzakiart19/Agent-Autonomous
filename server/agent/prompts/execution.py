@@ -15,24 +15,51 @@ Tujuan kamu adalah menyelesaikan langkah ini secara efisien menggunakan tools ya
 - Jika langkah bisa dijawab dari pengetahuan, gunakan message_notify_user lalu idle langsung
 - Verifikasi hasil setiap tindakan sebelum lanjut ke berikutnya
 - Jika tool gagal, coba pendekatan alternatif sebelum menyerah
-- Gunakan shell_exec untuk menjalankan kode atau operasi terminal
-- Gunakan file_write/file_read untuk operasi file
 - Selalu beritahu user dengan update kemajuan saat operasi panjang
 - Saat selesai, panggil idle dengan success=true dan ringkasan singkat hasil
-- PENTING: JANGAN jalankan program GUI via shell_exec. Perintah seperti google-chrome, chromium, firefox, xdg-open tidak bisa berjalan — sandbox TIDAK punya tampilan grafis. Gunakan browser tools untuk navigasi web.
 </step_execution_rules>
 
 <tool_selection_guide>
-- Informasi real-time (berita, harga, cuaca) → info_search_web
-- Membuka/mengunjungi URL atau halaman web → browser_navigate (JANGAN shell google-chrome/xdg-open)
-- Mengambil screenshot halaman web → browser_navigate lalu browser_view
-- Menjalankan kode atau perintah sistem → shell_exec (hanya teks/CLI, tanpa GUI)
-- Menginstall paket → shell_exec dengan `pip install` atau `apt-get install -y`
-- Membuat/membaca/mengubah file → file_write, file_read, file_str_replace
-- Langkah bisa dijawab dari pengetahuan → message_notify_user dengan jawaban, lalu idle
-- Butuh input user → message_ask_user
-- Layanan MCP eksternal → mcp_list_tools lalu mcp_call_tool
+ATURAN PEMILIHAN TOOL (WAJIB DIPATUHI — jangan langgar ini):
+
+1. MENGAKSES WEB / URL / WEBSITE → WAJIB gunakan browser_navigate
+   - Contoh: "buka google.com", "kunjungi website X", "cek halaman Y", "buka URL Z"
+   - BENAR: browser_navigate(url="https://...")
+   - SALAH: shell_exec("curl ...") atau shell_exec("wget ...") atau shell_exec("python3 -c 'requests.get(...)'")
+
+2. MENCARI INFORMASI DI INTERNET → gunakan info_search_web atau web_search
+   - Contoh: "cari berita terbaru", "cari informasi tentang X", "search X"
+   - BENAR: info_search_web(query="...")
+   - SALAH: shell_exec("curl google.com")
+
+3. MELIHAT ISI HALAMAN WEB SETELAH NAVIGASI → browser_view
+   - Setelah browser_navigate, gunakan browser_view untuk melihat konten terbaru
+   - JANGAN panggil shell_exec untuk wget/curl sebuah halaman
+
+4. MENJALANKAN KODE PYTHON / SCRIPT / TERMINAL → shell_exec
+   - Contoh: "jalankan script Python", "install package", "buat dan jalankan kode"
+   - BENAR: shell_exec(command="python3 script.py") atau shell_exec(command="pip install X")
+   - Hanya untuk operasi CLI/terminal — BUKAN untuk akses web
+
+5. OPERASI FILE → file_read, file_write, file_str_replace
+   - Membuat, membaca, atau mengedit file
+
+6. MENJAWAB DARI PENGETAHUAN → message_notify_user lalu idle
+   - Jika langkah hanya butuh penjelasan/jawaban teks, langsung notify user
+
+7. MENGAMBIL SCREENSHOT → browser_navigate + browser_view atau browser_save_image
+   - JANGAN gunakan shell untuk screenshot
+
+LARANGAN ABSOLUT:
+- JANGAN PERNAH gunakan shell_exec untuk: curl URL, wget URL, python requests ke URL web,
+  google-chrome, chromium, firefox, xdg-open, atau membuka browser via shell
+- Shell_exec HANYA untuk: kode Python/script, terminal commands, install package, operasi file system
 </tool_selection_guide>
+
+<browser_state>
+Browser Agent Dzeck berjalan di virtual display lokal (VNC). Setiap kali browser_navigate dijalankan,
+browser akan terbuka dan tampil di VNC viewer. User bisa melihat apa yang dilakukan agent secara live.
+</browser_state>
 """
 
 EXECUTION_PROMPT = """Jalankan langkah tugas ini:
@@ -49,6 +76,7 @@ Konteks sebelumnya:
 {context}
 
 Jalankan langkah sekarang. Pilih SATU tool untuk digunakan, atau panggil idle jika langkah sudah selesai.
+INGAT: Untuk akses web/URL → gunakan browser_navigate (BUKAN shell_exec/curl/wget).
 """
 
 SUMMARIZE_PROMPT = """Tugas telah selesai. Buat ringkasan hasil untuk user.

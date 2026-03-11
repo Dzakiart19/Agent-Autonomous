@@ -22,6 +22,42 @@ logger = logging.getLogger(__name__)
 E2B_ENABLED = bool(os.environ.get("E2B_API_KEY", ""))
 PLAYWRIGHT_ENABLED = os.environ.get("PLAYWRIGHT_ENABLED", "true").lower() == "true"
 
+
+def _find_chromium_executable() -> Optional[str]:
+    """Find the best available Chromium/Chrome binary on this system."""
+    import glob as _glob
+    import subprocess as _sp
+
+    candidates = [
+        "/home/runner/workspace/.cache/ms-playwright/chromium-1091/chrome-linux/chrome",
+        "/home/runner/.cache/ms-playwright/chromium-1091/chrome-linux/chrome",
+    ]
+    # Playwright cache — any version in workspace or home
+    for pattern in [
+        "/home/runner/workspace/.cache/ms-playwright/chromium-*/chrome-linux/chrome",
+        "/home/runner/.cache/ms-playwright/chromium-*/chrome-linux/chrome",
+        "/home/runner/workspace/.cache/ms-playwright/chromium-*/chrome-linux64/chrome",
+        "/home/runner/.cache/ms-playwright/chromium-*/chrome-linux64/chrome",
+    ]:
+        found = sorted(_glob.glob(pattern))
+        if found:
+            candidates = found + candidates
+
+    for path in candidates:
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+
+    # Try PATH
+    for name in ("chromium", "chromium-browser", "google-chrome"):
+        try:
+            result = _sp.run(["which", name], capture_output=True, text=True, timeout=2)
+            if result.returncode == 0 and result.stdout.strip():
+                return result.stdout.strip()
+        except Exception:
+            pass
+
+    return None
+
 _browser_lock = threading.Lock()
 _browser: Any = None
 
@@ -254,11 +290,20 @@ class PlaywrightSession:
             if display:
                 env["DISPLAY"] = display
 
-            self._browser = self._pw.chromium.launch(
-                headless=self._headless,
-                args=launch_args,
-                env=env if not self._headless else None,
-            )
+            # Find executable path — Playwright's bundled chromium may differ from what
+            # 'playwright install' put in place. We check the cache ourselves.
+            exe = _find_chromium_executable()
+            launch_kwargs: dict = {
+                "headless": self._headless,
+                "args": launch_args,
+            }
+            if exe:
+                launch_kwargs["executable_path"] = exe
+                logger.info("[Browser] Chromium executable: %s", exe)
+            if not self._headless:
+                launch_kwargs["env"] = env
+
+            self._browser = self._pw.chromium.launch(**launch_kwargs)
             self._context = self._browser.new_context(
                 viewport={"width": 1280, "height": 720},
                 user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -540,27 +585,30 @@ def _install_playwright_chromium() -> bool:
 
 def _make_session() -> Any:
     """Create the best available browser session.
-    Priority: Local Playwright > E2B > HTTP fallback.
-    Auto-installs Chromium if needed.
+    Priority: Local Playwright (with VNC display) > E2B > HTTP fallback.
+    Browser always runs locally so it is visible in the VNC viewer.
+    E2B is reserved for shell/code execution only.
     """
     if _playwright_available and PLAYWRIGHT_ENABLED:
         sess = PlaywrightSession()
         if sess.start():
-            logger.info("[Browser] Using local headless Playwright (screenshot mode).")
+            mode = "VNC non-headless" if not sess._headless else "headless"
+            logger.info("[Browser] Using local Playwright (%s).", mode)
             return sess
-        logger.warning("[Browser] Local Playwright failed — trying auto-install Chromium...")
+        logger.warning("[Browser] Local Playwright failed — trying auto-install...")
         if _install_playwright_chromium():
             sess2 = PlaywrightSession()
             if sess2.start():
                 logger.info("[Browser] Playwright started after auto-install.")
                 return sess2
-        logger.warning("[Browser] Playwright still unavailable, trying fallback.")
+        logger.warning("[Browser] Local Playwright still unavailable.")
 
+    # E2B fallback: headless browser in cloud sandbox (no VNC visibility)
     if E2B_ENABLED:
-        logger.info("[Browser] Using E2B cloud sandbox for browser automation.")
+        logger.info("[Browser] Falling back to E2B cloud browser (screenshots only).")
         return E2BBrowserSession()
 
-    logger.warning("[Browser] Using HTTP fallback (no screenshots).")
+    logger.warning("[Browser] Using HTTP fallback (no screenshots, no JS).")
     return HTTPBrowserSession()
 
 

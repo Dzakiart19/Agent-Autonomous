@@ -18,11 +18,17 @@ Planning rules:
 
 Step writing guidelines:
 - Use imperative form: "Search for...", "Create a file...", "Navigate to..."
-- Be specific about what needs to be done, not how to do it (the executor decides how)
+- Be specific about what needs to be done AND which tool category to use
 - Include the expected outcome in the description when helpful
 - For research tasks: include steps to access multiple sources
 - For coding tasks: include steps to test and verify the code works
-- For web tasks: include steps to navigate, interact, and verify the result
+- For web tasks: use browser_navigate/browser_view in step descriptions (NEVER shell/curl)
+
+Tool routing hints to embed in step descriptions:
+- Web access / URL / website → "Buka [URL] menggunakan browser" → executor akan pakai browser_navigate
+- Search → "Cari informasi tentang X" → executor akan pakai info_search_web
+- Code / script execution → "Jalankan kode Python ..." → executor akan pakai shell_exec
+- File operations → "Buat/baca file ..." → executor akan pakai file_write/file_read
 """
 
 CREATE_PLAN_PROMPT = """Analyze the following user request and create an execution plan.
