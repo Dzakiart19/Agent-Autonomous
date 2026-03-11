@@ -285,7 +285,7 @@ class PlaywrightSession:
                     else:
                         self._context = self._browser.new_context(
                             viewport={"width": 1280, "height": 720},
-                            user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                            user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
                         )
                         self._page = self._context.new_page()
                     self._page.on("console", lambda msg: self.console_logs.append("[{}] {}".format(msg.type, msg.text)))
@@ -307,20 +307,27 @@ class PlaywrightSession:
                 "--no-sandbox",
                 "--disable-dev-shm-usage",
                 "--disable-setuid-sandbox",
-                "--no-zygote",
+                "--disable-gpu", "--disable-software-rasterizer",
                 "--disable-extensions",
                 "--disable-background-timer-throttling",
                 "--disable-backgrounding-occluded-windows",
                 "--disable-renderer-backgrounding",
+                "--no-first-run", "--no-default-browser-check",
+                "--disable-sync", "--disable-default-apps",
+                "--disable-infobars", "--disable-popup-blocking",
+                "--disable-translate", "--disable-notifications",
+                "--disable-component-update",
+                "--disable-blink-features=AutomationControlled",
+                "--disable-features=TranslateUI,InfiniteSessionRestore,MediaRouter",
+                "--autoplay-policy=no-user-gesture-required",
+                "--password-store=basic", "--use-mock-keychain",
                 "--window-size=1280,720",
                 "--window-position=0,0",
                 "--start-maximized",
             ]
 
-            if display:
-                launch_args += ["--kiosk"]
-            else:
-                launch_args += ["--disable-gpu", "--single-process"]
+            if not display:
+                launch_args += ["--single-process"]
 
             env = dict(os.environ)
             if display:
@@ -341,7 +348,7 @@ class PlaywrightSession:
             self._cdp_mode = False
             self._context = self._browser.new_context(
                 viewport={"width": 1280, "height": 720},
-                user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
             )
             self._page = self._context.new_page()
             self._page.on("console", lambda msg: self.console_logs.append("[{}] {}".format(msg.type, msg.text)))
@@ -365,19 +372,25 @@ class PlaywrightSession:
     def navigate(self, url: str) -> ToolResult:
         if not self._started and not self.start():
             return ToolResult(success=False, message="Playwright not available.")
-        try:
-            self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            self._page.wait_for_timeout(1200)
-            self.current_url = self._page.url
-            title = self._page.title()
-            content = self._page.inner_text("body")[:8000]
-            return ToolResult(
-                success=True,
-                message="Page: {}\nURL: {}\n\n{}".format(title, self.current_url, content),
-                data={"url": self.current_url, "title": title, "content": content},
-            )
-        except Exception as e:
-            return ToolResult(success=False, message="Navigate failed: {}".format(e))
+        last_err = None
+        for attempt in range(2):
+            try:
+                self._page.goto(url, wait_until="domcontentloaded", timeout=45000)
+                self._page.wait_for_timeout(1500)
+                self.current_url = self._page.url
+                title = self._page.title()
+                content = self._page.inner_text("body")[:8000]
+                return ToolResult(
+                    success=True,
+                    message="Page: {}\nURL: {}\n\n{}".format(title, self.current_url, content),
+                    data={"url": self.current_url, "title": title, "content": content},
+                )
+            except Exception as e:
+                last_err = e
+                logger.warning("[Browser] Navigate attempt %d failed: %s", attempt + 1, e)
+                if attempt == 0:
+                    self._page.wait_for_timeout(2000)
+        return ToolResult(success=False, message="Navigate failed: {}".format(last_err))
 
     def view(self) -> ToolResult:
         if not self._started:

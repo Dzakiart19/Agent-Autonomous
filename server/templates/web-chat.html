@@ -375,8 +375,8 @@
 
     #tp-content{flex:1;min-height:0;display:flex;flex-direction:column;position:relative;overflow:hidden}
     #tp-browser-area{flex:1;position:relative;display:flex;align-items:stretch;overflow:hidden}
-    #vnc-container{position:absolute;inset:0;background:#111;z-index:2;display:none}
-    #vnc-container canvas{width:100%!important;height:100%!important;object-fit:contain}
+    #vnc-container{position:absolute;inset:0;background:#111;z-index:2;display:none;touch-action:none;-webkit-user-select:none;user-select:none}
+    #vnc-container canvas{width:100%!important;height:100%!important;object-fit:contain;touch-action:none}
     #tp-screenshot{position:absolute;inset:0;object-fit:contain;width:100%;height:100%;
       background:var(--surface2);cursor:pointer;z-index:1;display:none}
     #tp-empty{display:flex;flex-direction:column;align-items:center;justify-content:center;
@@ -1476,6 +1476,10 @@ async function connectVNC() {
       tpLive.classList.add('on');
       tpStatus.textContent = S.isTakeover ? 'Mode interaktif — kamu mengontrol' : 'LIVE — klik "Ambil Kendali" untuk kontrol';
       console.log('[VNC] Connected to live desktop');
+
+      vncCont.addEventListener('touchstart', function vncAutoTakeover(e) {
+        if (!S.isTakeover) { toggleTakeover(); }
+      }, { once: true, passive: true });
     });
 
     S.rfb.addEventListener('disconnect', (e) => {
@@ -1529,17 +1533,16 @@ function toggleTakeover() {
   S.isTakeover = !S.isTakeover;
   const btn = document.getElementById('takeover-btn');
   const lbl = document.getElementById('takeover-lbl');
-  btn.id = 'takeover-btn';
 
   if (S.rfb) {
     S.rfb.viewOnly = !S.isTakeover;
     S.rfb.showDotCursor = true;
+    S.rfb.focusOnClick = true;
     if (S.isTakeover) {
-      vncCont.focus();
       S.rfb.focus();
-      vncCont.style.cursor = 'default';
-    } else {
-      vncCont.style.cursor = 'default';
+      try { vncCont.focus(); } catch {}
+      const c = vncCont.querySelector('canvas');
+      if (c) { c.style.touchAction = 'none'; }
     }
   }
   btn.className = S.isTakeover ? 'active' : '';

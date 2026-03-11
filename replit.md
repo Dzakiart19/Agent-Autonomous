@@ -1,222 +1,80 @@
 # Dzeck AI
 
-Cross-platform AI chat + autonomous agent app built with Expo (React Native) and Node.js backend.
-Implements Manus-like autonomous agent architecture with class-based tools, PlannerAgent + ExecutionAgent pattern.
+## Overview
+Dzeck AI is a cross-platform application built with Expo (React Native) and Node.js, designed to provide an AI chat experience alongside autonomous agent capabilities. It implements a Manus-like autonomous agent architecture featuring class-based tools and a PlannerAgent + ExecutionAgent pattern. The project aims to deliver a robust and interactive AI assistant with real-time streaming, session persistence, and integrated browser automation.
 
-## Architecture (Manus-like Autonomous Agent)
+**Key capabilities include:**
+- Real-time AI chat with streaming responses.
+- Autonomous agent mode with planning and execution.
+- Interactive web UI with live VNC display for browser tools.
+- Isolated and secure shell/code execution in a cloud sandbox.
+- Comprehensive session management with resume and rollback features.
+- Support for the Model Context Protocol (MCP).
 
-| Aspek | Implementation |
-|---|---|
-| Language | Python async (AsyncGenerator) |
-| LLM | Cloudflare Workers AI (llama-3.3-70b-instruct-fp8-fast via AI Gateway) |
-| Framework | Pydantic BaseModel + async generator streaming |
-| Database | MongoDB Atlas (motor async driver) for session/agent persistence |
-| Cache | Redis (aioredis) for session state caching |
-| Browser | Playwright non-headless on VNC display :10 (visible LIVE) + HTTP fallback |
-| Shell Sandbox | E2B Cloud Sandbox (isolated, secure, timeout: 600s/10min with keepalive, workspace: /home/user/dzeck-ai) |
-| Architecture | DDD: Domain / Application / Infrastructure layers |
-| Session mgmt | Full session resume + rollback support |
-| Default Language | Bahasa Indonesia (semua prompt) |
-| Tools | Class-based dengan @tool decorator (BaseTool pattern) |
+## User Preferences
+- I prefer the AI to communicate using simple language.
+- I want iterative development where I can provide feedback at each major step.
+- Ask before making any major architectural changes or introducing new dependencies.
+- I prefer detailed explanations for complex technical decisions.
+- Do not make changes to the `app/` folder without explicit instruction.
+- All prompts should be in Bahasa Indonesia by default.
 
-## VNC Architecture
+## System Architecture
 
-- **Xvfb** virtual display on `:10`, screen `1280x720x24`
-- **Fluxbox** lightweight window manager for proper window rendering
-- **xsetroot** sets solid background color (`#1a1a2e`) so display is not black
-- **No standalone Chromium on boot** — VNC display shows the agent's Playwright browser when it works. No separate kiosk browser.
-- **Playwright agent browser** appears on VNC display in `--kiosk --start-maximized` mode when the AI agent runs browser tools
-- **x11vnc** VNC server on port `5910` (NOT 5900 — avoids system conflicts), cursor mode `arrow` for visible mouse cursor
-- **Native WS→TCP proxy** in Node.js `routes.ts`: browser connects to `/vnc-ws` WebSocket → proxied directly to TCP port 5910 (no websockify needed)
-- **Stale lock cleanup** on each server restart: removes `/tmp/.X10-lock` and `/tmp/.X11-unix/X10`
-- **Fluxbox kiosk config**: `routes.ts` writes `~/.fluxbox/init` (toolbar hidden, no decorations) and `~/.fluxbox/apps` (all windows maximized, no decorations) before launching Fluxbox
-- **noVNC** client loaded from CDN in `server/templates/vnc-view.html` and `server/templates/web-chat.html`
-- DISPLAY env var set to `:10` early at route initialization (before server accepts requests) for all spawned subprocesses
-- **Mobile VNC Toolbar** (`vnc-view.html`): floating left-side toolbar with takeover, keyboard, clipboard, Ctrl+Alt+Del, Esc, Tab, F5, F11 buttons; collapsible with toggle tab
-- **Web Chat VNC Controls** (`web-chat.html`): toolbar row (#tp-controls) appears when takeover is active — keyboard, clipboard/paste, Esc, Tab, F5/Refresh, Enter buttons
-- **Nix packages**: `xorg.xsetroot`, `xorg.xdpyinfo`, `fluxbox`, `feh` added for VNC display management
-- **Setup script** (`setup.sh`): checks VNC system packages, installs Python/Node deps, configures Fluxbox, creates .env template
+**Core Architecture:**
+- **Manus-like Autonomous Agent:** Utilizes a PlannerAgent and ExecutionAgent pattern with class-based tools and a `@tool` decorator.
+- **Language:** Python `async` (AsyncGenerator) for the agent, Node.js for the backend.
+- **LLM:** Cloudflare Workers AI (specifically `llama-3.3-70b-instruct-fp8-fast` via AI Gateway).
+- **Framework:** Pydantic BaseModel for data models, `async` generator for streaming.
+- **Database:** MongoDB Atlas for session and agent persistence.
+- **Cache:** Redis for session state caching.
+- **Browser Automation:** Playwright (non-headless) running on a VNC display for live interaction, with HTTP fallback.
+- **Shell Sandbox:** E2B Cloud Sandbox for isolated and secure code execution, with a 600s timeout and keepalive. The workspace is `/home/user/dzeck-ai/`.
+- **System Design:** Domain-Driven Design (DDD) with clear separation of Domain, Application, and Infrastructure layers.
+- **Session Management:** Full session resume and rollback support.
+- **Tooling:** Class-based tools implemented with a `BaseTool` pattern and `@tool` decorator.
 
-## MCP Configuration
+**UI/UX and Web Chat Features:**
+- **Manus-style Web UI:** Redesigned `server/templates/web-chat.html` for a Manus-like interface.
+- **Dynamic UI Elements:** Smooth transitions between welcome screen and chat, dynamic computer panel toggle.
+- **VNC Integration:**
+    - Xvfb virtual display on `:10` with `1280x720x24` resolution.
+    - Fluxbox lightweight window manager for proper window rendering.
+    - `x11vnc` server on port `5910`.
+    - Native WebSocket to TCP proxy for VNC connection.
+    - Playwright agent browser appears on VNC in kiosk mode for live interaction.
+    - `noVNC` client loaded via CDN in HTML templates.
+    - Mobile-friendly VNC toolbar with essential controls (takeover, keyboard, clipboard, etc.).
+    - VNC auto-shutdown after 10 minutes of idle activity, with auto-restart on agent demand.
+- **Sandbox Terminal:** Real-time streaming output from E2B sandbox for shell tools, displayed in a dark terminal panel.
+- **Plan Cards:** Agent plans are displayed as expandable cards in the chat with real-time status updates.
+- **Tool Items:** Each tool call shows status (calling, called, error) with visual indicators.
+- **"Komputer Dzeck" Panel:** Side panel dynamically switches between VNC for browser tools and Sandbox Terminal for other tools.
+- **"Perencana" Tab:** Provides an overview of all plan steps and their status.
+- **Clean Chat:** Only final AI responses are shown in the main chat; tool activity is neatly organized under steps.
+- **Browser Screenshot:** Live screenshots from Playwright are displayed in tool cards and the panel.
+- **Expandable Tool Cards:** Show colored accent bars, icons, labels, and expandable inline content without modals.
 
-- **MCP_SERVER_URL**: `https://mcp.cloudflare.com/mcp` (Cloudflare MCP server)
-- **MCP_AUTH_TOKEN**: Required for Cloudflare MCP OAuth authentication (separate from CF_API_KEY)
-- Auth priority: `MCP_AUTH_TOKEN` > `CF_API_KEY` for MCP requests
-- Tools: `mcp_list_tools` (discover available tools), `mcp_call_tool` (execute MCP tool)
+**Technical Implementations:**
+- **Per-Session Isolation:** Each agent request gets a unique `DZECK_SESSION_ID`; files stored in `/tmp/dzeck_files/{session_id}/` with path traversal protection.
+- **File Delivery:** System prompt includes rules for the agent to create downloadable files (`.zip`, `.pdf`, etc.), with binary formats generated via Python scripts in `shell_exec`. Files are synced between local and E2B sandbox.
+- **Browser Persistence (CDP Architecture):** Node.js server launches persistent Chromium with remote debugging enabled and anti-detection flags. Python agent connects via `playwright.chromium.connect_over_cdp()`.
+- **True Real-Time Streaming:** Uses `AsyncGenerator` pattern and `asyncio.Queue` to bridge sync HTTP requests with async generators for unbuffered, real-time SSE streaming.
+- **Tool Registry:** Centralized registry manages tool instantiation, dynamic schema generation for LLMs, and tool execution dispatch.
 
-## Key Features
+## External Dependencies
 
-- **Manus-like Web UI**: Full redesign di `server/templates/web-chat.html` dengan Manus-style interface
-  - **Welcome → Chat Transition**: switchToConv() uses dynamic DOM query to always remove current #empty-state; works correctly after startNewChat() recreates welcome screen
-  - **Komputer Button**: Header button untuk toggle computer panel secara manual (bukan hanya saat tool dipanggil)
-  - **E2B Sandbox**: Shell/code tools run in isolated E2B cloud sandbox (timeout: 600s with keepalive every 3 iterations); Browser tools use local Playwright on VNC display :10 (visible LIVE). **Workspace/Output split**: `/home/user/dzeck-ai/` is workspace for scripts (NO download buttons), `/home/user/dzeck-ai/output/` is for deliverables (download buttons shown). Terminal prompt shows `$dzeck-ai`. File tools auto-sync between local and E2B: `file_write`/`file_str_replace` write to both E2B sandbox and local; only files targeting `output/` get download URLs. After `shell_exec`, only output/ files are synced back (binary-safe via base64). Dedupe by filename prevents duplicate download buttons. Auto-installs reportlab, python-docx, openpyxl, Pillow on sandbox creation.
-  - **Browser Persistence (CDP Architecture)**: Node.js server launches a persistent Chromium with `--remote-debugging-port=9222` on VNC display. Python agent connects via `playwright.chromium.connect_over_cdp()` instead of launching. When agent exits, Chromium stays alive (managed by Node.js). User can interact with the browser after agent finishes. `DZECK_CDP_URL` env var passed to agent process. VNC idle timeout: 10 min.
-  - **VNC Interaction**: noVNC configured with `focusOnClick=true`, `qualityLevel=6`, `compressionLevel=2`. User clicks "Ambil Kendali" to enable mouse/keyboard input via VNC.
-  - **Tool Panel Routing**: Browser tools → VNC panel (live desktop); ALL other tools (shell, file, search, message, MCP) → Sandbox Terminal panel
-  - **Per-Session Isolation**: Each agent request gets `DZECK_SESSION_ID` env var. Files stored in `/tmp/dzeck_files/{session_id}/`. Download endpoint restricted to `/tmp/dzeck_files/` only (no arbitrary path access). Path traversal attacks blocked.
-  - **File Delivery**: System prompt has `<file_delivery_rules>` section requiring agent to create actual downloadable files (.zip, .pdf, .docx, .xlsx, .png, .jpg, .svg, .csv, .json, .txt, .md, .html, .js, .py, .sql). Binary formats generated via shell_exec Python scripts.
-  - **VNC Idle Auto-Shutdown**: VNC display auto-stops after 10 minutes idle. Activity tracked via `vncTouch()` on agent requests and WS connections. Auto-restarts when agent needs it via `ensureVncRunning()`.
-  - **Sandbox Terminal**: Shell tools show dark terminal panel (#tp-terminal-area) with real-time streaming output from E2B sandbox (not blank VNC). Commands displayed with `$ ` prefix, stdout/stderr color-coded
-  - **Plan Cards**: Plan agent tampil sebagai expandable card dalam chat, real-time update. Each plan has unique DOM prefix (plan.id + step.id) so multiple plans don't collide
-  - **Tool Items**: Setiap tool call tampil dengan spinner (calling) → checkmark (called) → X (error)
-  - **Komputer Dzeck Panel**: Side panel — shows VNC for browser tools, Sandbox Terminal for shell/code/file tools
-  - **Perencana Tab**: Overview semua plan steps dengan status (completed/running/pending)
-  - **Clean Chat**: Hanya respons AI final yang tampil di chat, tool activity tersembunyi rapi di bawah steps
-  - **Browser Screenshot**: Screenshot langsung dari Playwright browser muncul di tool card dan panel bawah
-- **Chat Mode**: Real-time streaming via Cloudflare Workers AI SSE
-- **Agent Mode**: Async autonomous Plan-Act agent dengan real tool execution
-- **Class-Based Tools**: BaseTool + @tool decorator pattern (Manus architecture)
-- **Tool Registry**: Centralized registry dengan dynamic schema generation
-- **Session Persistence**: Full MongoDB session history with Redis cache
-- **Browser Automation**: Playwright-powered real browser dengan live screenshot (base64) streamed ke frontend
-- **Expandable Tool Cards**: AgentToolCard shows colored left accent bar, icon, label, expandable inline content (shell/search/browser/file) — no modals
-- **message_notify_user streaming**: Intercepted as streaming message_start/chunk/end events → chat bubbles
-- **Session Resume/Rollback**: Resume interrupted sessions, rollback to any step
-- **MCP Protocol**: Support for Model Context Protocol (HTTP/SSE transport, extensible to stdio/WebSocket)
-- **DDD Architecture**: Clean separation of domain, application, and infrastructure
-
-## Setup
-
-### Running the Project
-
-1. **Backend** (Start Backend workflow): `npm run server:dev` — serves on port 5000 + 8081 (web chat UI)
-2. **Frontend** (Start Frontend workflow): Expo Metro bundler on port 8082 (mobile only)
-
-### Web Access
-- **Web Chat UI**: Accessible at port 80 (default domain) → Express serves `server/templates/web-chat.html`
-- **Mobile Landing**: Accessible at `/mobile` path
-- **API**: All `/api/*` routes on port 5000
-
-### Components Added
-- `components/ChatBox.tsx` — Input box component for Expo mobile app (was missing)
-- `server/templates/web-chat.html` — Full-featured browser chat UI with SSE streaming
-
-### Environment Variables (set in Replit Secrets)
-
-```
-CF_API_KEY=<cloudflare-api-key>
-CF_ACCOUNT_ID=6c807fe58ad83714e772403cd528dbeb
-CF_GATEWAY_NAME=dzeck
-CF_MODEL=@cf/meta/llama-3.3-70b-instruct-fp8-fast
-CF_AGENT_MODEL=@cf/meta/llama-3.3-70b-instruct-fp8-fast
-MONGODB_URI=<mongodb-atlas-uri>
-REDIS_HOST=<redis-host>
-REDIS_PORT=16364
-REDIS_PASSWORD=<redis-password>
-SESSION_TTL_HOURS=24
-PLAYWRIGHT_ENABLED=true
-MCP_SERVER_URL=<optional-mcp-server-url>
-```
-
-## File Structure
-
-```
-server/
-  index.ts              - Express server entry point
-  routes.ts             - API routes + session management endpoints
-  agent/
-    agent_flow.py       - Core async Plan-Act agent (DzeckAgent AsyncGenerator)
-    db/
-      session_store.py  - MongoDB session persistence (motor async)
-      cache.py          - Redis session cache (aioredis)
-    services/
-      session_service.py - Session lifecycle orchestration (DDD Application layer)
-    tools/
-      __init__.py       - Tools package - exports all tool classes + registry
-      base.py           - BaseTool class + @tool decorator (Manus pattern)
-      browser.py        - BrowserTool class + Playwright/HTTP browser functions
-      shell.py          - ShellTool class + persistent shell session management
-      file.py           - FileTool class + line-based file read/write/str_replace
-      search.py         - SearchTool class + DuckDuckGo search (no API key needed)
-      message.py        - MessageTool class + user notification/ask functions
-      mcp.py            - MCPTool class + MCPClientManager (HTTP/SSE transport)
-      registry.py       - Centralized tool registry + dynamic schema generation
-    prompts/
-      system.py         - System prompt (Bahasa Indonesia default, Manus-style rules)
-      planner.py        - Planner prompts (PLANNER_SYSTEM_PROMPT, CREATE_PLAN, UPDATE_PLAN)
-      execution.py      - Execution step prompts (EXECUTION_SYSTEM_PROMPT, EXECUTION_PROMPT)
-    models/             - Pydantic data models (Plan, Step, Memory, ToolResult, etc.)
-    utils/              - Robust JSON parser
-app/                    - Expo React Native frontend
-components/             - UI components (AgentPlanView, AgentToolCard, ComputerView, etc.)
-```
-
-## API Endpoints
-
-- `GET /api/status` — Health check
-- `POST /api/chat` — Streaming chat (SSE)
-- `POST /api/agent` — Async autonomous agent (SSE) with session_id
-- `GET /api/sessions` — List all sessions from MongoDB
-- `GET /api/sessions/:id` — Get session details
-- `POST /api/sessions/:id/resume` — Resume an interrupted session (SSE)
-- `POST /api/sessions/:id/rollback` — Rollback session to previous step
-- `GET /api/sessions/:id/events` — Get full event log for a session
-
-## Tool Architecture (Manus Pattern)
-
-### BaseTool + @tool Decorator
-```python
-class MyTool(BaseTool):
-    name: str = "my_tool"
-    
-    @tool(name="my_function", description="...", parameters={...}, required=[...])
-    def _my_function(self, arg: str) -> ToolResult:
-        return ToolResult(success=True, message="done")
-```
-
-### Tool Registry (registry.py)
-- Instantiates all tool classes as singletons
-- Provides `get_all_tool_schemas()` for dynamic LLM schema generation
-- Provides `execute_tool(name, args)` for centralized dispatch
-- Provides `resolve_tool_name(name)` for alias resolution
-
-### TOOL_SCHEMAS (agent_flow.py)
-- Built dynamically from `_build_tool_schemas()` using class-based schemas
-- Includes special `idle` tool
-- Converts OpenAI format → CF-native format automatically
-
-## Python Dependencies
-
-- `pydantic>=2.0.0` - Pydantic BaseModel data models (Plan, Step, Memory, ToolResult)
-- `playwright>=1.40.0` - Real browser automation (Chromium headless, screenshots)
-- `e2b>=0.17.0` - E2B cloud sandbox for isolated shell/code execution
-- `motor>=3.7.0` - Async MongoDB driver (optional, lazy import)
-- `redis>=5.0.0` - Redis async client (optional, lazy import)
-
-Note: `requests`, `aiohttp`, `beautifulsoup4` are NOT used — the codebase uses Python stdlib `urllib` + regex for HTTP/HTML parsing.
-
-## Nix System Dependencies (for Playwright Chromium)
-
-Required for Playwright to work on Replit/NixOS:
-- `nspr`, `nss`, `mesa`, `expat`, `libxkbcommon`, `glib`, `dbus`
-- `atk`, `at-spi2-atk`
-- `xorg.libXdamage`, `xorg.libXrandr`, `xorg.libXfixes`, `xorg.libX11`
-- `xorg.libXcomposite`, `xorg.libXext`, `xorg.libXcursor`, `xorg.libXtst`
-- `xorg.libXinerama`, `xorg.libXi`, `xorg.libxcb`, `xorg.libXScrnSaver`
-- `cups`, `alsa-lib`, `pango`, `cairo`
-
-## Key Technical Notes
-
-### Async Agent Flow (AsyncGenerator)
-The agent uses Python's `AsyncGenerator` pattern - events are yielded as they happen, enabling true real-time streaming without blocking.
-
-### True Real-Time Streaming (asyncio.Queue bridge)
-`call_cf_streaming_realtime()` uses an `asyncio.Queue` to bridge the sync urllib thread with the async generator. Cloudflare chunks are pushed to the queue from a thread via `loop.call_soon_threadsafe()` and yielded immediately - no buffering, no fake streaming.
-
-### Session Persistence
-- **MongoDB Atlas**: Stores full session documents (plan, steps, events, metadata)
-- **Redis**: Fast cache for hot session state (TTL: 1 hour per session)
-- **Session ID**: Auto-generated UUID, returned in first SSE event
-
-### Cloudflare Workers AI Response Format
-- Non-streaming: `{"response": "...", "usage": {...}}`
-- Streaming SSE: `data: {"response": "chunk"}` then `data: [DONE]`
-- Tool calls: `{"tool_calls": [{"name": "func", "arguments": {...}}]}`
-
-### Agent Event Types
-- `type: "session"` — session_id assigned
-- `type: "plan"` — plan creating/created/running/updated/completed
-- `type: "step"` — step running/completed/failed
-- `type: "tool"` — tool calling/called/error
-- `type: "message_start/chunk/end"` — streaming text
-- `type: "done"` — agent finished
+- **Cloudflare Workers AI:** For Language Model inference (`llama-3.3-70b-instruct-fp8-fast`).
+- **MongoDB Atlas:** Cloud-hosted NoSQL database for session and agent state persistence (using `motor` async driver).
+- **Redis:** In-memory data store for session state caching (using `aioredis`).
+- **Playwright:** Python library for browser automation, interacting with Chromium.
+- **E2B Cloud Sandbox:** External service for isolated and secure shell/code execution.
+- **noVNC:** HTML5 VNC client for displaying the virtual desktop in the web UI.
+- **DuckDuckGo Search:** Used by the `SearchTool` (no API key required).
+- **MCP (Model Context Protocol):** Support for `mcp.cloudflare.com` for tool discovery and execution.
+- **Nix Packages:** Essential system libraries required for Playwright Chromium to function in the Replit environment (e.g., `xorg`, `mesa`, `glib`, `cups`, `pango`, `cairo`).
+- **Python Libraries:**
+    - `pydantic`: For data validation and settings management.
+    - `e2b`: Python client for E2B Cloud Sandbox.
+    - `motor`: Asynchronous MongoDB driver.
+    - `redis`: Asynchronous Redis client.
