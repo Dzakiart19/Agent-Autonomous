@@ -1,6 +1,6 @@
 import express from "express";
 import type { Request, Response, NextFunction } from "express";
-import { registerRoutes } from "./routes";
+import { registerRoutes, handleVncUpgrade } from "./routes";
 import * as fs from "fs";
 import * as path from "path";
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -345,7 +345,14 @@ function printExpoQR(port: number): void {
   const { createServer: createHttpServer } = await import("node:http");
   const extraPorts = [8081, 8082]; // 8081=external:80, 8082=external:3000
   for (const webPort of extraPorts) {
-    createHttpServer(app).listen(
+    const extraServer = createHttpServer(app);
+    // Attach VNC WebSocket upgrade handler to extra port servers
+    extraServer.on("upgrade", (req: any, socket: any, head: any) => {
+      const fn = handleVncUpgrade;
+      if (fn) fn(req, socket, head);
+      else socket.destroy();
+    });
+    extraServer.listen(
       {
         port: webPort,
         host: "0.0.0.0",

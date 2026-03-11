@@ -6,6 +6,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { randomUUID } from "node:crypto";
 import multer from "multer";
+import { WebSocketServer, WebSocket as WsWebSocket } from "ws";
 
 // ─── File Download Store ─────────────────────────────────────────────────────
 const DZECK_FILES_DIR = "/tmp/dzeck_files";
@@ -55,6 +56,9 @@ function setupSSEHeaders(res: any) {
   res.setHeader("X-Accel-Buffering", "no");
   res.flushHeaders();
 }
+
+// Exported so index.ts can attach VNC WebSocket handling to extra port servers
+export let handleVncUpgrade: ((req: any, socket: any, head: any) => void) | null = null;
 
 export async function registerRoutes(app: any): Promise<Server> {
   const startupCfg = getCFConfig();
@@ -474,6 +478,18 @@ export async function registerRoutes(app: any): Promise<Server> {
     res.json({ started });
   });
 
+  // ─── VNC viewer HTML page (loaded by React Native WebView) ───────────────
+  app.get("/vnc-view", (_req: any, res: any) => {
+    const html = path.join(__dirname, "templates", "vnc-view.html");
+    if (fs.existsSync(html)) {
+      res.setHeader("Content-Type", "text/html; charset=utf-8");
+      res.setHeader("Cache-Control", "no-store");
+      res.sendFile(html);
+    } else {
+      res.status(404).send("vnc-view.html not found");
+    }
+  });
+
   // ─── VNC status endpoint ──────────────────────────────────────────────────
   app.get("/api/vnc/status", (_req: any, res: any) => {
     const wsPort = 6081;
@@ -496,56 +512,71 @@ export async function registerRoutes(app: any): Promise<Server> {
   const httpServer = createServer(app);
 
   // ─── WebSocket proxy for VNC (/vnc-ws → websockify :6081) ───────────────
-  httpServer.on("upgrade", (req: any, socket: any, head: any) => {
-    const url = req.url || "";
+  // Uses 'ws' WebSocketServer for reliable proxy (handles browser → VNC streaming)
+  const wss = new WebSocketServer({ noServer: true });
 
-    if (!url.startsWith("/vnc-ws")) {
-      socket.destroy();
-      return;
-    }
+  wss.on("connection", (clientWs: any, _req: any) => {
+    console.log("[VNC-WS] Client connected → proxying to websockify:6081");
 
-    const http = require("node:http");
-    const proxyHeaders = Object.assign({}, req.headers, { host: "127.0.0.1:6081" });
-
-    const proxyReq = http.request({
-      host: "127.0.0.1",
-      port: 6081,
-      method: req.method || "GET",
-      path: "/",
-      headers: proxyHeaders,
+    // Connect to websockify
+    const wsockify = new WsWebSocket("ws://127.0.0.1:6081", ["binary"], {
+      perMessageDeflate: false,
     });
 
-    proxyReq.on("upgrade", (_proxyRes: any, proxySocket: any, proxyHead: any) => {
-      const resLines = [
-        "HTTP/1.1 101 Switching Protocols",
-        `Upgrade: websocket`,
-        "Connection: Upgrade",
-        `Sec-WebSocket-Accept: ${_proxyRes.headers["sec-websocket-accept"] || ""}`,
-      ];
-      const proto = _proxyRes.headers["sec-websocket-protocol"];
-      if (proto) resLines.push(`Sec-WebSocket-Protocol: ${proto}`);
-      socket.write(resLines.join("\r\n") + "\r\n\r\n");
-
-      if (proxyHead && proxyHead.length > 0) proxySocket.write(proxyHead);
-      if (head && head.length > 0) proxySocket.write(head);
-
-      proxySocket.pipe(socket);
-      socket.pipe(proxySocket);
-
-      socket.on("close", () => proxySocket.destroy());
-      socket.on("error", () => proxySocket.destroy());
-      proxySocket.on("close", () => socket.destroy());
-      proxySocket.on("error", () => socket.destroy());
+    wsockify.on("open", () => {
+      console.log("[VNC-WS] Connected to websockify ✓");
     });
 
-    proxyReq.on("error", (err: any) => {
-      console.error("[VNC-WS] Proxy to websockify failed:", err.message);
-      try { socket.write("HTTP/1.1 503 VNC Not Ready\r\n\r\n"); } catch {}
-      socket.destroy();
+    // Relay: client → websockify
+    clientWs.on("message", (data: any, isBinary: boolean) => {
+      if (wsockify.readyState === WsWebSocket.OPEN) {
+        wsockify.send(data, { binary: isBinary });
+      }
     });
 
-    proxyReq.end();
+    // Relay: websockify → client
+    wsockify.on("message", (data: any, isBinary: boolean) => {
+      if (clientWs.readyState === WsWebSocket.OPEN) {
+        clientWs.send(data, { binary: isBinary });
+      }
+    });
+
+    // Error / close handling
+    const cleanup = () => {
+      try { clientWs.close(); } catch {}
+      try { wsockify.close(); } catch {}
+    };
+
+    wsockify.on("error", (err: Error) => {
+      console.error("[VNC-WS] websockify error:", err.message);
+      cleanup();
+    });
+
+    wsockify.on("close", () => {
+      console.log("[VNC-WS] websockify disconnected");
+      cleanup();
+    });
+
+    clientWs.on("error", () => cleanup());
+    clientWs.on("close", () => {
+      console.log("[VNC-WS] Client disconnected");
+      cleanup();
+    });
   });
+
+  // Shared upgrade handler — also applied to extra-port servers in index.ts
+  handleVncUpgrade = (req: any, socket: any, head: any) => {
+    const url = req.url || "";
+    if (url.startsWith("/vnc-ws")) {
+      wss.handleUpgrade(req, socket, head, (ws: any) => {
+        wss.emit("connection", ws, req);
+      });
+    } else {
+      socket.destroy();
+    }
+  };
+
+  httpServer.on("upgrade", handleVncUpgrade);
 
   return httpServer;
 }

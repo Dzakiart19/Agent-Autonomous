@@ -61,6 +61,7 @@ PYTHON_PACKAGES=(
   "e2b>=0.17.0"
   "redis>=5.0.0"
   "motor>=3.7.0"
+  "websockify>=0.11.0"
 )
 
 for pkg in "${PYTHON_PACKAGES[@]}"; do

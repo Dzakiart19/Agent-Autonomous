@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Komputer Dzeck — Live VNC</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100%; height: 100%;
+    background: #0a0a0f;
+    overflow: hidden;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    color: #fff;
+  }
+
+  #status-overlay {
+    position: fixed; inset: 0; z-index: 100;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 20px;
+    background: #0a0a0f;
+    transition: opacity 0.4s ease;
+  }
+  #status-overlay.hidden {
+    opacity: 0; pointer-events: none;
+  }
+
+  .scan-box {
+    width: 80px; height: 80px;
+    position: relative;
+    border: 1px solid rgba(108,92,231,0.3);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  .scan-line {
+    position: absolute; left: 0; right: 0; height: 2px;
+    background: #6C5CE7;
+    box-shadow: 0 0 8px #6C5CE7;
+    animation: scan 1.8s ease-in-out infinite;
+  }
+  .scan-corner {
+    position: absolute; width: 12px; height: 12px;
+    border-color: #6C5CE7; border-style: solid;
+  }
+  .scan-corner.tl { top: 4px; left: 4px; border-width: 2px 0 0 2px; }
+  .scan-corner.tr { top: 4px; right: 4px; border-width: 2px 2px 0 0; }
+  .scan-corner.bl { bottom: 4px; left: 4px; border-width: 0 0 2px 2px; }
+  .scan-corner.br { bottom: 4px; right: 4px; border-width: 0 2px 2px 0; }
+
+  @keyframes scan {
+    0% { transform: translateY(0); }
+    50% { transform: translateY(76px); }
+    100% { transform: translateY(0); }
+  }
+
+  #status-text {
+    font-size: 13px; color: #8E8E93; letter-spacing: 0.3px;
+    text-align: center; max-width: 240px; line-height: 1.5;
+  }
+  #retry-count {
+    font-size: 11px; color: #4A4A55;
+  }
+  #error-msg {
+    font-size: 12px; color: #FF453A; display: none;
+    text-align: center; max-width: 240px;
+  }
+
+  #vnc-canvas {
+    width: 100%; height: 100%;
+    display: none;
+  }
+  #vnc-canvas canvas {
+    width: 100% !important;
+    height: 100% !important;
+    object-fit: contain;
+    cursor: default;
+  }
+  #vnc-canvas.interactive canvas {
+    cursor: crosshair;
+  }
+
+  /* Takeover banner */
+  #takeover-banner {
+    position: fixed; bottom: 0; left: 0; right: 0; z-index: 200;
+    background: rgba(108,92,231,0.95);
+    padding: 10px 20px;
+    display: none; align-items: center; justify-content: space-between;
+    backdrop-filter: blur(8px);
+  }
+  #takeover-banner.show { display: flex; }
+  #takeover-banner span {
+    font-size: 13px; font-weight: 500;
+  }
+  #takeover-banner button {
+    background: rgba(255,255,255,0.2);
+    border: 1px solid rgba(255,255,255,0.3);
+    color: #fff; border-radius: 6px;
+    padding: 5px 12px; font-size: 12px; cursor: pointer;
+  }
+</style>
+</head>
+<body>
+
+<div id="status-overlay">
+  <div class="scan-box">
+    <div class="scan-line"></div>
+    <div class="scan-corner tl"></div>
+    <div class="scan-corner tr"></div>
+    <div class="scan-corner bl"></div>
+    <div class="scan-corner br"></div>
+  </div>
+  <div id="status-text">Menghubungkan ke Komputer Dzeck...</div>
+  <div id="retry-count"></div>
+  <div id="error-msg"></div>
+</div>
+
+<div id="vnc-canvas"></div>
+
+<div id="takeover-banner">
+  <span>Mode Interaktif — Kamu mengontrol</span>
+  <button onclick="releaseTakeover()">Lepas Kendali</button>
+</div>
+
+<script type="module">
+  const NOVNC_CDNS = [
+    'https://cdn.jsdelivr.net/gh/novnc/noVNC@v1.5.0/core/rfb.js',
+    'https://unpkg.com/@novnc/novnc@1.5.0/core/rfb.js',
+  ];
+
+  const statusEl   = document.getElementById('status-text');
+  const retryEl    = document.getElementById('retry-count');
+  const errorEl    = document.getElementById('error-msg');
+  const overlay    = document.getElementById('status-overlay');
+  const vncCanvas  = document.getElementById('vnc-canvas');
+  const banner     = document.getElementById('takeover-banner');
+
+  let RFB = null;
+  let rfb = null;
+  let retries = 0;
+  const MAX_RETRIES = 25;
+  const RETRY_MS = 2000;
+  let retryTimer = null;
+  let takeover = false;
+
+  // Read params from URL
+  const params = new URLSearchParams(location.search);
+  const autoTakeover = params.get('takeover') === '1';
+
+  function setStatus(msg, sub = '') {
+    statusEl.textContent = msg;
+    retryEl.textContent = sub;
+    errorEl.style.display = 'none';
+  }
+
+  function setError(msg) {
+    errorEl.textContent = msg;
+    errorEl.style.display = 'block';
+    statusEl.textContent = '';
+    retryEl.textContent = '';
+  }
+
+  // Load noVNC library
+  async function loadNoVNC() {
+    for (const url of NOVNC_CDNS) {
+      try {
+        const m = await import(url);
+        RFB = m.default || m;
+        console.log('[VNC] noVNC loaded from', url);
+        return true;
+      } catch(e) {
+        console.warn('[VNC] Failed to load from', url, e.message);
+      }
+    }
+    return false;
+  }
+
+  async function checkVncReady() {
+    try {
+      const r = await fetch('/api/vnc/status');
+      const d = await r.json();
+      return d.ready === true;
+    } catch { return false; }
+  }
+
+  async function startVnc() {
+    try { await fetch('/api/vnc/start', { method: 'POST' }); } catch {}
+  }
+
+  async function connect() {
+    if (rfb) return;
+    clearTimeout(retryTimer);
+
+    if (!RFB) {
+      setStatus('Memuat noVNC...');
+      const ok = await loadNoVNC();
+      if (!ok) { setError('Gagal memuat noVNC. Cek koneksi internet.'); return; }
+    }
+
+    if (retries === 0) {
+      setStatus('Memulai komputer virtual...');
+      await startVnc();
+    }
+
+    const ready = await checkVncReady();
+    if (!ready) {
+      retries++;
+      if (retries <= MAX_RETRIES) {
+        setStatus('Memulai komputer virtual...', `(${retries}/${MAX_RETRIES})`);
+        retryTimer = setTimeout(connect, RETRY_MS);
+      } else {
+        setError('Komputer virtual tidak tersedia.\nCoba refresh halaman ini.');
+        retries = 0;
+      }
+      return;
+    }
+
+    retries = 0;
+    disconnect();
+
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${proto}//${location.host}/vnc-ws`;
+
+    setStatus('Menghubungkan...');
+
+    try {
+      rfb = new RFB(vncCanvas, wsUrl, {
+        credentials: { password: '' },
+        shared: true,
+        wsProtocols: ['binary'],
+      });
+      rfb.scaleViewport = true;
+      rfb.resizeSession = false;
+      rfb.viewOnly = !autoTakeover && !takeover;
+      rfb.showDotCursor = false;
+      rfb.background = '#0a0a0f';
+
+      vncCanvas.style.display = 'none';
+      let connected = false;
+
+      rfb.addEventListener('connect', () => {
+        connected = true;
+        overlay.classList.add('hidden');
+        vncCanvas.style.display = 'block';
+        console.log('[VNC] Connected ✓');
+        window.vncConnected = true;
+        // Notify parent (React Native WebView)
+        sendToParent({ type: 'vnc_connected' });
+        if (autoTakeover || takeover) enableTakeover();
+      });
+
+      rfb.addEventListener('disconnect', (e) => {
+        vncCanvas.style.display = 'none';
+        overlay.classList.remove('hidden');
+        banner.classList.remove('show');
+        rfb = null;
+
+        if (connected) {
+          setStatus('Koneksi terputus — menghubungkan ulang...');
+          sendToParent({ type: 'vnc_disconnected' });
+          retryTimer = setTimeout(connect, 3000);
+        } else {
+          retries++;
+          if (retries <= MAX_RETRIES) {
+            setStatus('Menghubungkan ulang...', `(${retries}/${MAX_RETRIES})`);
+            retryTimer = setTimeout(connect, RETRY_MS);
+          } else {
+            setError('Gagal terhubung ke komputer virtual.');
+            retries = 0;
+          }
+        }
+      });
+
+      rfb.addEventListener('credentialsrequired', () => {
+        rfb.sendCredentials({ password: '' });
+      });
+
+    } catch(e) {
+      console.error('[VNC]', e);
+      setError('Error: ' + e.message);
+      rfb = null;
+    }
+  }
+
+  function disconnect() {
+    clearTimeout(retryTimer);
+    if (rfb) {
+      try { rfb.disconnect(); } catch {}
+      rfb = null;
+    }
+  }
+
+  function enableTakeover() {
+    takeover = true;
+    if (rfb) {
+      rfb.viewOnly = false;
+      vncCanvas.classList.add('interactive');
+      try { vncCanvas.focus(); rfb.focus(); } catch {}
+    }
+    banner.classList.add('show');
+    sendToParent({ type: 'takeover_enabled' });
+  }
+
+  window.releaseTakeover = function() {
+    takeover = false;
+    if (rfb) {
+      rfb.viewOnly = true;
+      vncCanvas.classList.remove('interactive');
+    }
+    banner.classList.remove('show');
+    sendToParent({ type: 'takeover_released' });
+  };
+
+  // Message bridge for React Native WebView
+  function sendToParent(data) {
+    try {
+      if (window.ReactNativeWebView) {
+        window.ReactNativeWebView.postMessage(JSON.stringify(data));
+      } else if (window.parent !== window) {
+        window.parent.postMessage(JSON.stringify(data), '*');
+      }
+    } catch {}
+  }
+
+  // Receive messages from React Native WebView
+  window.addEventListener('message', (e) => {
+    try {
+      const msg = JSON.parse(e.data);
+      if (msg.type === 'takeover') enableTakeover();
+      else if (msg.type === 'release') window.releaseTakeover();
+      else if (msg.type === 'connect') connect();
+      else if (msg.type === 'disconnect') disconnect();
+    } catch {}
+  });
+
+  // Start connection
+  connect();
+</script>
+</body>
+</html>
