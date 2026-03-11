@@ -369,8 +369,21 @@ class PlaywrightSession:
         except Exception:
             return None
 
+    def _ensure_alive(self) -> bool:
+        """Check if the CDP connection is still alive, reconnect if needed."""
+        if not self._started:
+            return self.start()
+        try:
+            self._page.title()
+            return True
+        except Exception as e:
+            logger.warning("[Browser] Connection stale (%s), reconnecting...", e)
+            self.disconnect()
+            self._started = False
+            return self.start()
+
     def navigate(self, url: str) -> ToolResult:
-        if not self._started and not self.start():
+        if not self._ensure_alive():
             return ToolResult(success=False, message="Playwright not available.")
         last_err = None
         for attempt in range(2):
@@ -389,11 +402,18 @@ class PlaywrightSession:
                 last_err = e
                 logger.warning("[Browser] Navigate attempt %d failed: %s", attempt + 1, e)
                 if attempt == 0:
-                    self._page.wait_for_timeout(2000)
+                    try:
+                        self._page.wait_for_timeout(2000)
+                    except Exception:
+                        logger.warning("[Browser] Page dead during retry wait, reconnecting...")
+                        self.disconnect()
+                        self._started = False
+                        if not self.start():
+                            break
         return ToolResult(success=False, message="Navigate failed: {}".format(last_err))
 
     def view(self) -> ToolResult:
-        if not self._started:
+        if not self._ensure_alive():
             return ToolResult(success=False, message="No page loaded.")
         try:
             content = self._page.inner_text("body")[:8000]
@@ -407,7 +427,7 @@ class PlaywrightSession:
             return ToolResult(success=False, message="View failed: {}".format(e))
 
     def click(self, x: float, y: float, button: str = "left") -> ToolResult:
-        if not self._started and not self.start():
+        if not self._ensure_alive():
             return ToolResult(success=False, message="Playwright not available.")
         try:
             btn_map = {"left": "left", "right": "right", "middle": "middle"}
@@ -425,7 +445,7 @@ class PlaywrightSession:
             return ToolResult(success=False, message="Click failed: {}".format(e))
 
     def type_text(self, text: str) -> ToolResult:
-        if not self._started and not self.start():
+        if not self._ensure_alive():
             return ToolResult(success=False, message="Playwright not available.")
         try:
             self._page.keyboard.type(text)
@@ -439,7 +459,7 @@ class PlaywrightSession:
             return ToolResult(success=False, message="Type failed: {}".format(e))
 
     def scroll(self, direction: str, amount: int = 3) -> ToolResult:
-        if not self._started and not self.start():
+        if not self._ensure_alive():
             return ToolResult(success=False, message="Playwright not available.")
         try:
             delta_y = amount * 200 if direction == "down" else -amount * 200
@@ -460,7 +480,7 @@ class PlaywrightSession:
         return ToolResult(success=True, message="Console logs:\n\n{}".format(text), data={"logs": logs})
 
     def save_screenshot(self, path: str) -> ToolResult:
-        if not self._started:
+        if not self._ensure_alive():
             return ToolResult(success=False, message="No page loaded.")
         try:
             os.makedirs(os.path.dirname(path) or ".", exist_ok=True)

@@ -512,7 +512,10 @@ export async function registerRoutes(app: any): Promise<Server> {
       const x11vncProc = spawnProc(x11vnc, [
         "-display", VNC_DISPLAY, "-forever", "-shared", "-nopw",
         "-rfbport", String(VNC_PORT_NUM),
-        "-noxdamage", "-cursor", "arrow", "-quiet",
+        "-noxdamage", "-cursor", "arrow",
+        "-xkb", "-noxrecord", "-noxfixes",
+        "-nowf", "-norc",
+        "-quiet",
       ], {
         detached: false, stdio: "ignore",
         env: { ...process.env, DISPLAY: VNC_DISPLAY },

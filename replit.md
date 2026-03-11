@@ -40,11 +40,12 @@ Dzeck AI is a cross-platform application built with Expo (React Native) and Node
 - **VNC Integration:**
     - Xvfb virtual display on `:10` with `1280x720x24` resolution.
     - Fluxbox lightweight window manager for proper window rendering.
-    - `x11vnc` server on port `5910`.
+    - `x11vnc` server on port `5910` with `-xkb -noxrecord -noxfixes` flags for proper keyboard input passthrough.
     - Native WebSocket to TCP proxy for VNC connection.
     - Playwright agent browser appears on VNC in kiosk mode for live interaction.
     - `noVNC` client loaded via CDN in HTML templates.
     - Mobile-friendly VNC toolbar with essential controls (takeover, keyboard, clipboard, etc.).
+    - Mobile touch events handled with `preventDefault()` and `stopPropagation()` in takeover mode; listeners bound once to prevent accumulation on reconnects.
     - VNC auto-shutdown after 10 minutes of idle activity, with auto-restart on agent demand.
 - **Sandbox Terminal:** Real-time streaming output from E2B sandbox for shell tools, displayed in a dark terminal panel.
 - **Plan Cards:** Agent plans are displayed as expandable cards in the chat with real-time status updates.
