@@ -121,7 +121,7 @@ class ApiService {
 
             if (done) {
               isClosed = true;
-              if (!isClosed) onDone?.();
+              onDone?.();
               break;
             }
 

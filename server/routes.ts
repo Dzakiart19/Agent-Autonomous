@@ -526,7 +526,7 @@ export async function registerRoutes(app: any): Promise<Server> {
   // ─── VNC status endpoint ──────────────────────────────────────────────────
   app.get("/api/vnc/status", (_req: any, res: any) => {
     const wsPort = 6081;
-    const vncPort = 5900;
+    const vncPort = VNC_PORT_NUM; // x11vnc runs on 5910, not 5900
     const tcpCheck = net.createConnection({ port: vncPort, host: "127.0.0.1" });
     tcpCheck.setTimeout(800);
     tcpCheck.on("connect", () => {

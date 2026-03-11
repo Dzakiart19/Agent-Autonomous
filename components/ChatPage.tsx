@@ -405,7 +405,7 @@ export function ChatPage({
   );
 
   const renderListFooter = () => {
-    if (!thinking.active && !isLoading) return null;
+    if (!thinking.active) return null;
     return (
       <View style={styles.thinkingRow}>
         <View style={styles.thinkingAvatar}>
