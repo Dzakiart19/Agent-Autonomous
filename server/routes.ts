@@ -387,6 +387,8 @@ export async function registerRoutes(app: any): Promise<Server> {
   const _vncProcs: any[] = [];
   let _vncStarted = false;
   let _vncStarting = false;
+  const VNC_DISPLAY = ":10";
+  const VNC_PORT_NUM = 5910;
 
   async function ensureVncRunning(): Promise<boolean> {
     if (_vncStarted) {
@@ -401,70 +403,88 @@ export async function registerRoutes(app: any): Promise<Server> {
     _vncStarting = true;
 
     try {
-      const { spawn: spawnProc } = require("node:child_process");
+      const { spawn: spawnProc, execSync } = require("node:child_process");
       const findBin = (name: string): string => {
-        const { execSync } = require("node:child_process");
         try { return execSync(`which ${name}`, { encoding: "utf-8" }).trim(); } catch {}
         try {
-          const result = execSync(`find /nix/store -name ${name} -type f 2>/dev/null | head -1`, { encoding: "utf-8" }).trim();
-          return result || name;
+          const paths = [
+            ...require("node:child_process").execSync(`find /nix/store -name ${name} -type f 2>/dev/null`, { encoding: "utf-8" }).split("\n").filter(Boolean),
+          ];
+          const binPaths = paths.filter((p: string) => p.includes("/bin/"));
+          return binPaths[0] || paths[0] || name;
         } catch { return name; }
       };
 
       const xvfb = findBin("Xvfb");
       const x11vnc = findBin("x11vnc");
-      const DISPLAY = ":10";
-      const VNC_PORT = "5900";
-      const WS_PORT = "6081";
+
+      // Kill any stale processes on the display/port before starting
+      try { execSync(`pkill -f "Xvfb ${VNC_DISPLAY}" 2>/dev/null || true`, { encoding: "utf-8" }); } catch {}
+      try { execSync(`pkill -f "x11vnc.*${VNC_PORT_NUM}" 2>/dev/null || true`, { encoding: "utf-8" }); } catch {}
+      await new Promise(r => setTimeout(r, 500));
 
       // 1. Start Xvfb
-      const xvfbProc = spawnProc(xvfb, [DISPLAY, "-screen", "0", "1280x720x24", "-ac"], {
+      const xvfbProc = spawnProc(xvfb, [VNC_DISPLAY, "-screen", "0", "1280x720x24", "-ac", "-nolisten", "tcp"], {
         detached: false, stdio: "ignore",
         env: { ...process.env },
       });
       _vncProcs.push(xvfbProc);
-      await new Promise(r => setTimeout(r, 1500));
+      await new Promise(r => setTimeout(r, 2000));
 
       if (xvfbProc.exitCode !== null) {
         console.error("[VNC] Xvfb failed to start");
         _vncStarting = false; return false;
       }
 
-      // 2. Start x11vnc
+      // 2. Draw solid background so display isn't black
+      try {
+        const xsetroot = findBin("xsetroot");
+        spawnProc(xsetroot, ["-solid", "#0e0e14"], {
+          detached: false, stdio: "ignore",
+          env: { ...process.env, DISPLAY: VNC_DISPLAY },
+        });
+      } catch {}
+
+      // 3. Start x11vnc on VNC_PORT_NUM (avoids conflict with any system :5900)
       const x11vncProc = spawnProc(x11vnc, [
-        "-display", DISPLAY, "-forever", "-shared", "-nopw",
-        "-rfbport", VNC_PORT, "-noxdamage", "-noxfixes", "-quiet",
+        "-display", VNC_DISPLAY, "-forever", "-shared", "-nopw",
+        "-rfbport", String(VNC_PORT_NUM),
+        "-noxdamage", "-noxfixes", "-nocursorshape", "-nocursor", "-quiet",
       ], {
         detached: false, stdio: "ignore",
-        env: { ...process.env, DISPLAY },
+        env: { ...process.env, DISPLAY: VNC_DISPLAY },
       });
       _vncProcs.push(x11vncProc);
-      await new Promise(r => setTimeout(r, 1500));
+      await new Promise(r => setTimeout(r, 2000));
 
       if (x11vncProc.exitCode !== null) {
         console.error("[VNC] x11vnc failed to start");
         _vncStarting = false; return false;
       }
 
-      // 3. Start websockify
-      const wsProc = spawnProc("python3", [
-        "-m", "websockify", WS_PORT, `127.0.0.1:${VNC_PORT}`,
-      ], { detached: false, stdio: "ignore", env: { ...process.env } });
-      _vncProcs.push(wsProc);
-      await new Promise(r => setTimeout(r, 1000));
+      // 4. Set DISPLAY for Playwright and sub-processes
+      process.env.DISPLAY = VNC_DISPLAY;
+      process.env.DZECK_VNC_DISPLAY = VNC_DISPLAY;
 
-      if (wsProc.exitCode !== null) {
-        console.error("[VNC] websockify failed to start");
-        _vncStarting = false; return false;
-      }
-
-      // 4. Set DISPLAY for Playwright
-      process.env.DISPLAY = DISPLAY;
-      process.env.DZECK_VNC_DISPLAY = DISPLAY;
+      // 5. Launch Chromium on the virtual display so it's not blank
+      try {
+        const chromium = findBin("chromium") || findBin("chromium-browser") || findBin("google-chrome");
+        if (chromium) {
+          spawnProc(chromium, [
+            "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage",
+            "--window-size=1280,720", "--start-maximized",
+            "about:blank",
+          ], {
+            detached: false, stdio: "ignore",
+            env: { ...process.env, DISPLAY: VNC_DISPLAY },
+          });
+          console.log("[VNC] Chromium launched on display");
+        }
+      } catch {}
 
       _vncStarted = true;
       _vncStarting = false;
-      console.log(`[VNC] Stack ready: DISPLAY=${DISPLAY} VNC=${VNC_PORT} WS=${WS_PORT}`);
+      console.log(`[VNC] Stack ready: DISPLAY=${VNC_DISPLAY} VNC_PORT=${VNC_PORT_NUM} (WS proxied natively)`);
       return true;
     } catch (err: any) {
       console.error("[VNC] Failed to start:", err.message);
@@ -524,55 +544,53 @@ export async function registerRoutes(app: any): Promise<Server> {
     });
   });
 
-  // ─── WebSocket proxy for VNC (/vnc-ws → websockify :6081) ───────────────
-  // Uses 'ws' WebSocketServer for reliable proxy (handles browser → VNC streaming)
+  // ─── WebSocket proxy for VNC (/vnc-ws → raw TCP :5910) ─────────────────
+  // Native Node.js WS→TCP proxy — no websockify needed.
+  // noVNC sends binary RFB protocol over WebSocket; we relay it directly to x11vnc.
   const wss = new WebSocketServer({ noServer: true });
 
   wss.on("connection", (clientWs: any, _req: any) => {
-    console.log("[VNC-WS] Client connected → proxying to websockify:6081");
+    console.log(`[VNC-WS] Client connected → proxying to VNC TCP:${VNC_PORT_NUM}`);
 
-    // Connect to websockify
-    const wsockify = new WsWebSocket("ws://127.0.0.1:6081", ["binary"], {
-      perMessageDeflate: false,
+    const vncSocket = net.createConnection({ port: VNC_PORT_NUM, host: "127.0.0.1" });
+
+    vncSocket.on("connect", () => {
+      console.log(`[VNC-WS] TCP connected to x11vnc:${VNC_PORT_NUM} ✓`);
     });
 
-    wsockify.on("open", () => {
-      console.log("[VNC-WS] Connected to websockify ✓");
-    });
-
-    // Relay: client → websockify
-    clientWs.on("message", (data: any, isBinary: boolean) => {
-      if (wsockify.readyState === WsWebSocket.OPEN) {
-        wsockify.send(data, { binary: isBinary });
+    // Relay: WebSocket client → VNC TCP socket
+    clientWs.on("message", (data: Buffer | ArrayBuffer | Buffer[], isBinary: boolean) => {
+      if (vncSocket.writable) {
+        const buf = Buffer.isBuffer(data) ? data : Buffer.from(data as ArrayBuffer);
+        vncSocket.write(buf);
       }
     });
 
-    // Relay: websockify → client
-    wsockify.on("message", (data: any, isBinary: boolean) => {
-      if (clientWs.readyState === WsWebSocket.OPEN) {
-        clientWs.send(data, { binary: isBinary });
+    // Relay: VNC TCP socket → WebSocket client
+    vncSocket.on("data", (data: Buffer) => {
+      if (clientWs.readyState === 1 /* OPEN */) {
+        clientWs.send(data, { binary: true });
       }
     });
 
-    // Error / close handling
     const cleanup = () => {
-      try { clientWs.close(); } catch {}
-      try { wsockify.close(); } catch {}
+      try { if (clientWs.readyState !== 3) clientWs.close(); } catch {}
+      try { vncSocket.destroy(); } catch {}
     };
 
-    wsockify.on("error", (err: Error) => {
-      console.error("[VNC-WS] websockify error:", err.message);
+    vncSocket.on("error", (err: Error) => {
+      console.error("[VNC-WS] TCP error:", err.message);
       cleanup();
     });
 
-    wsockify.on("close", () => {
-      console.log("[VNC-WS] websockify disconnected");
+    vncSocket.on("close", () => {
+      console.log("[VNC-WS] VNC TCP connection closed");
       cleanup();
     });
 
     clientWs.on("error", () => cleanup());
     clientWs.on("close", () => {
-      console.log("[VNC-WS] Client disconnected");
+      console.log("[VNC-WS] Browser client disconnected");
       cleanup();
     });
   });

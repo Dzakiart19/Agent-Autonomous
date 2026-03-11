@@ -23,6 +23,10 @@ localPort = 6081
 externalPort = 3001
 
 [[ports]]
+localPort = 6082
+externalPort = 4200
+
+[[ports]]
 localPort = 8081
 externalPort = 80
 
@@ -95,3 +99,4 @@ PLAYWRIGHT_ENABLED = "true"
 CF_MODEL = "@cf/qwen/qwen3-30b-a3b-fp8"
 CF_AGENT_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
 E2B_API_KEY = "e2b_566a6a5f596ccabdd31defe243791117791220b2"
+REDIS_HOST = "redis-16364.c279.us-central1-1.gce.cloud.redislabs.com"
