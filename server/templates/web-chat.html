@@ -531,7 +531,6 @@
   <div class="splash-logo">
     <img src="/assets/images/dzeck-logo-transparent.png" alt="Dzeck AI" onerror="this.src='/assets/images/icon.png'">
   </div>
-  <div class="splash-title">Dzeck AI</div>
   <div class="splash-sub">AUTONOMOUS AI AGENT</div>
   <div class="splash-dots">
     <div class="splash-dot"></div>
@@ -549,7 +548,7 @@
         <img src="/assets/images/icon.png" alt="" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">
         <svg viewBox="0 0 24 24" style="display:none"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
       </div>
-      <span class="sidebar-app-name">Dzeck AI</span>
+      <span class="sidebar-app-name"></span>
       <button class="sidebar-close-btn" onclick="closeSidebar()" aria-label="Tutup sidebar">
         <svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
       </button>
@@ -578,7 +577,7 @@
       <button id="sidebar-toggle" onclick="toggleSidebar()" aria-label="Menu">
         <svg viewBox="0 0 24 24"><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
       </button>
-      <div class="header-title" id="chat-title">Dzeck AI</div>
+      <div class="header-title" id="chat-title"></div>
       <div class="status-dot" id="status-dot"></div>
       <button id="computer-btn" onclick="toggleComputerPanel()" title="Komputer Dzeck">
         <svg viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
@@ -1006,7 +1005,7 @@ function startNewChat() {
   tpSS.src = '';
   tpEmpty.style.display = 'flex';
   tpStatus.textContent = 'Menunggu...';
-  document.getElementById('chat-title').textContent = 'Dzeck AI';
+  document.getElementById('chat-title').textContent = '';
   S.vncPort = 6081;
   inputArea.style.display = 'none';
 
@@ -1852,7 +1851,7 @@ function handleEvent(evt) {
       break;
 
     case 'title':
-      document.title = (evt.title||'Dzeck AI') + ' · Dzeck AI';
+      document.title = evt.title || 'Dzeck AI';
       if (S.currentSession) document.getElementById('chat-title').textContent = evt.title||'Chat';
       break;
 

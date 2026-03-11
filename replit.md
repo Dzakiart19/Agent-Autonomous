@@ -19,6 +19,12 @@ Dzeck AI is a cross-platform application built with Expo (React Native) and Node
 - Do not make changes to the `app/` folder without explicit instruction.
 - All prompts should be in Bahasa Indonesia by default.
 
+## Recent Updates (March 2026)
+- **System Prompt Upgraded:** `server/agent/prompts/system.py` fully rewritten based on official Dzeck system prompt spec. Now includes full agent loop, planner/knowledge/datasource module docs, VNC browser rules, sandbox environment info, and all tool use rules — aligned with Manus-grade agent behavior.
+- **Execution Prompt Updated:** `server/agent/prompts/execution.py` — removed "headless sandbox" restrictions. AI is now instructed that the browser runs on real VNC and can click, scroll, type just like a human operating a computer.
+- **Web UI — Duplicate Name Removed:** `server/templates/web-chat.html` — removed all HTML text occurrences of "Dzeck AI" name (splash title, sidebar app name, header title default). Only the logo image (which already contains the brand name) remains, avoiding duplication.
+- **Browser VNC Control:** Agent browser tools (browser_navigate, browser_click, browser_input, browser_scroll_up/down, browser_press_key, browser_select_option, browser_move_mouse) are fully active and run in the VNC-visible Chromium session via CDP. AI controls browser exactly like a human.
+
 ## System Architecture
 
 **Core Architecture:**

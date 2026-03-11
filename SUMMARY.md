@@ -1,255 +1,140 @@
-# Dzeck AI Chat APK - Rombakan Lengkap v2.0.0
-
-**Date**: March 10, 2026  
-**Status**: ✅ READY FOR PRODUCTION
-
----
-
-## 🎯 Tujuan Rombakan
-
-- ✅ Implementasi AI Agent dari Ai-DzeckV2
-- ✅ Non-streaming API responses (lengkap, bukan token per token)
-- ✅ UI Card design yang sama dengan Ai-DzeckV2
-- ✅ Perbaikan tools yang sebelumnya sering gagal
-- ✅ Integrasi Cloudflare Workers AI yang sempurna
+# Dzeck AI — Project Summary & Roadmap
+**Diperbarui:** Maret 2026  
+**Status:** Aktif dikembangkan
 
 ---
 
-## 📦 File yang Ditambahkan
+## Apa itu Dzeck AI?
 
-| File | Lines | Deskripsi |
-|------|-------|-----------|
-| `components/ChatCard.tsx` | 300+ | Card UI untuk messages (user/assistant/tool/step) |
-| `components/ChatScreen.tsx` | 250+ | Main chat interface dengan header & controls |
-| `lib/api-service.ts` | 150+ | Centralized API client dengan type safety |
-| `lib/useChat.ts` | 200+ | React hook untuk state management |
-| `IMPLEMENTATION.md` | - | Dokumentasi teknis lengkap |
-| `CHANGES.md` | - | Changelog & migration guide |
-| `QUICK_START.md` | - | Panduan setup cepat (5 menit) |
+Dzeck AI adalah agen AI otonom (autonomous AI agent) berbasis web dan mobile yang dirancang setara dengan Manus.im. Ia bisa menyelesaikan tugas-tugas kompleks secara mandiri menggunakan komputer — menjelajah web, menulis & menjalankan kode, membuat file, menganalisis data, dan berinteraksi dengan browser persis seperti manusia.
 
 ---
 
-## 🔧 File yang Dimodifikasi
+## Arsitektur Sistem
 
-| File | Perubahan |
-|------|-----------|
-| `server/routes.ts` | ✨ REWRITTEN - Non-streaming endpoints |
-| `.env` | ✨ UPDATED - Cloudflare config |
+### Stack Teknologi
+- **Frontend:** React Native (Expo) + TypeScript — berjalan di web dan mobile (Android/iOS)
+- **Backend:** Node.js + Express, menggunakan Server-Sent Events (SSE) untuk streaming real-time
+- **Agent Engine:** Python async (asyncio + AsyncGenerator) — otak dari sistem
+- **LLM:** Cloudflare Workers AI (`llama-3.3-70b-instruct-fp8-fast`) via AI Gateway
+- **Database:** MongoDB Atlas (session & agent state persistence via `motor`)
+- **Cache:** Redis (session state caching)
+- **Browser Automation:** Playwright via CDP ke Chromium yang berjalan di VNC display nyata
+- **Shell Sandbox:** E2B Cloud Sandbox — eksekusi kode Python/shell yang terisolasi dan aman
+- **VNC:** Xvfb + Fluxbox + x11vnc → noVNC (HTML5) untuk live browser view di UI
 
----
-
-## 🌟 Fitur Utama
-
-### 1. Non-Streaming Chat
-- **Endpoint**: `POST /api/chat`
-- **Request**: `{ messages: [...] }`
-- **Response**: `{ type, content, timestamp }`
-- **Keuntungan**: Respon lengkap dalam satu request, lebih stabil
-
-### 2. Agent Mode (SSE)
-- **Endpoint**: `POST /api/agent`
-- **Features**: Server-Sent Events, tool calling, autonomous tasks
-- **Response**: Event stream dengan session, message, tool events
-
-### 3. UI Components
-- **ChatScreen**: Main interface dengan header & controls
-- **ChatCard**: Message display (user/assistant/tool/step)
-- **ChatInput**: User input dengan attachment support
-- **Styling**: Sama dengan Ai-DzeckV2
-
-### 4. State Management
-- **useChat Hook**: Message management, loading, error states
-- **Auto-scroll**: Scroll to bottom on new messages
-- **Error Handling**: Comprehensive error management
-
-### 5. API Service
-- **Centralized Client**: Single source of truth untuk API calls
-- **Type-safe**: Full TypeScript interfaces
-- **Error Handling**: Retry logic dan error recovery
-
----
-
-## 🚀 Cloudflare Integration
+### Alur Kerja Agent
 
 ```
-API Key: YsjNngJW0aFPVNSxuCCANgzTePXfiOSHu5w-V62h
-Account ID: 6c807fe58ad83714e772403cd528dbeb
-Gateway Name: dzeck
+User Input
+    ↓
+Node.js Backend (routes.ts)
+    ↓ spawn subprocess
+Python Agent (agent_flow.py) — DzeckAgent
+    ↓
+Planner → buat rencana (Plan + Steps)
+    ↓
+Executor → jalankan satu tool per iterasi
+    ↓ tool calls
+[Browser VNC] [Shell E2B] [File] [Search] [MCP]
+    ↓ hasil/observasi
+Loop kembali → update plan → lanjut atau selesai
+    ↓
+Summarizer → kirim hasil final ke user
+```
 
-Models:
-- Chat: @cf/meta/llama-3-8b-instruct (fast)
-- Agent: @cf/meta/llama-3.1-70b-instruct (powerful)
+### Direktori Utama
 
-Endpoint:
-https://gateway.ai.cloudflare.com/v1/{accountId}/{gatewayName}/workers-ai/run/{model}
+```
+server/
+  agent/
+    agent_flow.py       ← Core agent loop (DzeckAgent class)
+    prompts/
+      system.py         ← System prompt utama (Dzeck identity + rules)
+      execution.py      ← Execution step prompt + tool guide
+      planner.py        ← Planner module prompt
+    tools/
+      browser.py        ← Browser tools (VNC CDP + E2B + HTTP fallback)
+      shell.py          ← Shell tools (E2B sandbox + local fallback)
+      file.py           ← File read/write/search tools
+      search.py         ← Web search + browse tools
+      message.py        ← Message notify/ask tools
+      mcp.py            ← MCP (Model Context Protocol) tools
+      registry.py       ← Tool registry & schema builder
+    models/             ← Pydantic data models (Plan, Step, Memory, etc.)
+    services/           ← Session service (MongoDB + Redis)
+  templates/
+    web-chat.html       ← Main web UI (Manus-style, VNC embedded, SSE)
+    landing-page.html   ← Landing page
+    vnc-view.html       ← VNC viewer standalone
+  index.ts              ← Express server entry point
+  routes.ts             ← API routes (/api/chat, /api/agent, /api/vnc/*)
+app/                    ← Expo React Native app (JANGAN dimodifikasi tanpa instruksi)
+assets/images/          ← Logo dan icon assets
 ```
 
 ---
 
-## ✅ Testing Results
+## Fitur yang Sudah Berjalan
 
-| Test | Status | Details |
-|------|--------|---------|
-| API Status | ✅ | Working - returns status & timestamp |
-| Chat Endpoint | ✅ | Non-streaming - returns complete response |
-| Response Format | ✅ | Valid JSON with type, content, timestamp |
-| Cloudflare Integration | ✅ | Verified - responses from Llama models |
-| Error Handling | ✅ | Robust - proper error messages |
-| Components | ✅ | Rendering correctly |
-
-### Test Command
-```bash
-curl -X POST http://localhost:5000/api/chat \
-  -H "Content-Type: application/json" \
-  -d '{"messages": [{"role": "user", "content": "Halo!"}]}'
-```
-
-### Result
-```json
-{
-  "type": "message",
-  "content": "Halo! Apa yang bisa saya bantu?",
-  "timestamp": "2026-03-10T16:31:06.491Z"
-}
-```
+- Real-time streaming AI chat via SSE
+- Agent mode: Plan → Execute → Summarize loop
+- 28+ tools: browser, shell, file, search, MCP, message
+- VNC live view: AI browser tampil di panel "Komputer Dzeck"
+- AI kontrol browser di VNC: klik, scroll, input, navigasi (setara manusia)
+- E2B Cloud Sandbox untuk eksekusi kode Python terisolasi
+- Session persistence (MongoDB) + caching (Redis)
+- File download: file output agent bisa didownload user
+- Browser CDP mode: persistent Chromium terhubung ke Python agent via CDP
+- Splash screen dengan logo Dzeck AI (tanpa duplikasi nama teks)
 
 ---
 
-## 📊 Perbandingan Before & After
+## Environment Variables yang Diperlukan
 
-| Aspek | Sebelum | Sesudah |
-|-------|---------|---------|
-| Response Type | Streaming (SSE) | Non-Streaming JSON |
-| Tools Status | ❌ Sering Gagal | ✅ Robust |
-| UI Design | Basic | Ai-DzeckV2 Style |
-| API Layer | Inline | Centralized Service |
-| State Management | Scattered | useChat Hook |
-| Error Handling | Minimal | Comprehensive |
-| Type Safety | Partial | Full TypeScript |
-| Code Organization | Mixed | Modular |
-| Documentation | Minimal | Extensive |
-
----
-
-## 📚 Dokumentasi
-
-- **IMPLEMENTATION.md**: Dokumentasi teknis lengkap
-- **CHANGES.md**: Changelog & migration guide
-- **QUICK_START.md**: Panduan setup cepat (5 menit)
-- **Inline Comments**: Di semua file baru
+| Variable | Keterangan |
+|---|---|
+| `CF_API_KEY` | Cloudflare Workers AI API key |
+| `CF_ACCOUNT_ID` | Cloudflare Account ID |
+| `CF_GATEWAY_NAME` | Cloudflare AI Gateway name |
+| `CF_AGENT_MODEL` | Model untuk agent (default: `@cf/meta/llama-3.3-70b-instruct-fp8-fast`) |
+| `CF_MODEL` | Model untuk chat biasa |
+| `E2B_API_KEY` | E2B Cloud Sandbox API key (opsional, tapi disarankan) |
+| `MONGODB_URI` | MongoDB Atlas connection string |
+| `REDIS_URL` | Redis connection URL |
 
 ---
 
-## 🚀 Quick Start
+## Roadmap ke Depan
 
-### 1. Setup (5 menit)
-```bash
-git clone https://github.com/Dzakiart19/chat-apk.git
-cd chat-apk
-npm install
-npm run server:dev
-```
+### Prioritas Tinggi
+1. Multi-tab browser — AI bisa membuka dan mengelola beberapa tab di VNC
+2. Screenshot streaming — screenshot realtime dari browser tampil di UI setiap step
+3. File manager UI — user bisa lihat dan download semua file output langsung dari web
+4. Agent memory — AI mengingat konteks dari sesi sebelumnya (long-term memory)
+5. Tool result preview — hasil browser/shell tampil inline di chat bubble
 
-### 2. Test API
-```bash
-curl http://localhost:5000/api/status
-```
+### Prioritas Menengah
+6. Custom tool plugins — user bisa tambah tool sendiri via konfigurasi
+7. Voice input/output — user bisa berbicara dengan Dzeck AI
+8. Task scheduler — agent bisa menjalankan tugas terjadwal
+9. Webhook integration — trigger agent dari webhook eksternal
+10. API key management UI — kelola semua API keys langsung dari web
 
-### 3. Use Components
-```typescript
-import { ChatScreen } from '@/components/ChatScreen';
-
-export default function App() {
-  return <ChatScreen />;
-}
-```
+### Optimasi
+11. Streaming screenshot di VNC — latency lebih rendah untuk live view
+12. Tool caching — cache hasil search/browse yang sama untuk hemat token
+13. Model selection — user bisa pilih model AI yang digunakan
+14. Cost tracking — monitor penggunaan token dan estimasi biaya
 
 ---
 
-## 🎓 Pembelajaran dari Ai-DzeckV2
+## Catatan Penting untuk Developer
 
-1. **Non-streaming Architecture**: Complete responses lebih reliable
-2. **UI Card Design**: Consistent styling untuk semua message types
-3. **Event-Based System**: SSE untuk real-time updates
-4. **Full TypeScript**: Type safety di semua layer
-5. **Error Handling**: Comprehensive error management
-6. **Modular Structure**: Clean separation of concerns
-
----
-
-## 🔗 Git Commits
-
-```
-87a185d 📖 Add quick start guide for easy setup
-bab0f94 📝 Add comprehensive CHANGES documentation
-ad47662 🚀 Rombakan lengkap: Non-streaming API, Ai-DzeckV2 UI, Cloudflare Workers AI
-```
-
----
-
-## 📦 Struktur Proyek
-
-```
-chat-apk/
-├── server/
-│   ├── index.ts              # Express setup
-│   ├── routes.ts             # ✨ Non-streaming endpoints
-│   └── agent/                # Agent flow
-├── components/
-│   ├── ChatScreen.tsx        # ✨ Main UI
-│   ├── ChatCard.tsx          # ✨ Card design
-│   ├── ChatInput.tsx         # Input
-│   └── ...
-├── lib/
-│   ├── api-service.ts        # ✨ API client
-│   ├── useChat.ts            # ✨ State hook
-│   └── ...
-├── .env                      # ✨ Config
-├── IMPLEMENTATION.md         # ✨ Docs
-├── CHANGES.md                # ✨ Changelog
-├── QUICK_START.md            # ✨ Quick guide
-└── README.md
-```
-
----
-
-## 🎯 Next Steps
-
-- [ ] Database persistence
-- [ ] User authentication
-- [ ] File upload support
-- [ ] Image generation
-- [ ] Voice input
-- [ ] Caching layer
-- [ ] Analytics
-- [ ] Production deployment
-
----
-
-## 💡 Tips
-
-1. **Development**: `npm run server:dev` untuk auto-reload
-2. **Testing**: Gunakan curl atau Postman untuk test API
-3. **Debugging**: Check console logs untuk error messages
-4. **Performance**: Non-streaming responses lebih cepat
-
----
-
-## 🎉 Kesimpulan
-
-Rombakan lengkap berhasil menghasilkan:
-
-- ✅ **Reliable API** dengan non-streaming responses
-- ✅ **Beautiful UI** dengan Ai-DzeckV2 design
-- ✅ **Clean Code** dengan proper separation of concerns
-- ✅ **Type Safety** dengan full TypeScript
-- ✅ **Better DX** dengan centralized API service
-- ✅ **Comprehensive Docs** untuk maintenance
-
-**Status**: READY FOR PRODUCTION ✅
-
----
-
-**Repository**: https://github.com/Dzakiart19/chat-apk  
-**Version**: 2.0.0  
-**Date**: March 10, 2026
+- Jangan modifikasi folder `app/` tanpa instruksi eksplisit dari user
+- System prompt ada di `server/agent/prompts/system.py` — diperbarui Maret 2026
+- Tool call schemas di-generate otomatis dari class-based tool instances di `registry.py`
+- Browser selalu mencoba CDP ke Chromium di port 9222 (VNC) sebelum fallback ke headless
+- E2B sandbox workspace: `/home/user/dzeck-ai/`, output: `/home/user/dzeck-ai/output/`
+- Agent berjalan sebagai subprocess Python dari Node.js, berkomunikasi via stdout JSON (SSE)
+- Semua prompt dalam Bahasa Indonesia secara default
