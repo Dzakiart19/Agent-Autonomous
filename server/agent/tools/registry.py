@@ -11,6 +11,8 @@ from server.agent.tools.file import FileTool, file_read, file_write, file_str_re
 from server.agent.tools.search import SearchTool, info_search_web, web_search, web_browse
 from server.agent.tools.message import MessageTool, message_notify_user, message_ask_user
 from server.agent.tools.mcp import MCPTool, mcp_call_tool, mcp_list_tools, get_mcp_manager
+from server.agent.tools.todo import TodoTool, todo_write, todo_update, todo_read
+from server.agent.tools.task import TaskTool, task_create, task_complete, task_list
 from server.agent.tools.browser import (
     BrowserTool,
     browser_navigate, browser_view, browser_click, browser_input,
@@ -28,6 +30,8 @@ _search_tool = SearchTool()
 _message_tool = MessageTool()
 _mcp_tool = MCPTool()
 _browser_tool = BrowserTool()
+_todo_tool = TodoTool()
+_task_tool = TaskTool()
 
 ALL_TOOL_INSTANCES = [
     _shell_tool,
@@ -36,6 +40,8 @@ ALL_TOOL_INSTANCES = [
     _message_tool,
     _mcp_tool,
     _browser_tool,
+    _todo_tool,
+    _task_tool,
 ]
 
 
@@ -80,6 +86,12 @@ TOOLS: Dict[str, Callable] = {
     "browser_save_image": browser_save_image,
     "mcp_call_tool": mcp_call_tool,
     "mcp_list_tools": mcp_list_tools,
+    "todo_write": todo_write,
+    "todo_update": todo_update,
+    "todo_read": todo_read,
+    "task_create": task_create,
+    "task_complete": task_complete,
+    "task_list": task_list,
 }
 
 TOOL_ALIASES: Dict[str, str] = {
@@ -95,6 +107,8 @@ TOOL_ALIASES: Dict[str, str] = {
     "browser_scroll_to_bottom": "browser_scroll_down",
     "browser_read_links": "browser_view",
     "browser_restart": "browser_navigate",
+    "todo": "todo_read",
+    "tasks": "task_list",
 }
 
 TOOLKIT_MAP: Dict[str, str] = {
@@ -113,6 +127,8 @@ TOOLKIT_MAP: Dict[str, str] = {
     "browser_save_image": "browser",
     "message_notify_user": "message", "message_ask_user": "message",
     "mcp_call_tool": "mcp", "mcp_list_tools": "mcp",
+    "todo_write": "todo", "todo_update": "todo", "todo_read": "todo",
+    "task_create": "task", "task_complete": "task", "task_list": "task",
 }
 
 

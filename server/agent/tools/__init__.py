@@ -10,6 +10,8 @@ from server.agent.tools.search import SearchTool
 from server.agent.tools.message import MessageTool
 from server.agent.tools.mcp import MCPTool, MCPClientManager, get_mcp_manager
 from server.agent.tools.browser import BrowserTool
+from server.agent.tools.todo import TodoTool
+from server.agent.tools.task import TaskTool
 from server.agent.tools.registry import (
     TOOLS,
     TOOL_ALIASES,
@@ -35,6 +37,8 @@ __all__ = [
     "MCPClientManager",
     "get_mcp_manager",
     "BrowserTool",
+    "TodoTool",
+    "TaskTool",
     "TOOLS",
     "TOOL_ALIASES",
     "TOOLKIT_MAP",

@@ -19,6 +19,14 @@ Dzeck AI is a cross-platform application built with Expo (React Native) and Node
 - Do not make changes to the `app/` folder without explicit instruction.
 - All prompts should be in Bahasa Indonesia by default.
 
+## Recent Updates (March 2026 — Session 3: System Prompt Upgrade)
+- **System Prompt Upgrade (Claude Cowork Integration):** `server/agent/prompts/system.py` diperbarui dengan seksi-seksi perilaku komprehensif: refusal_handling, tone_and_formatting, user_wellbeing, evenhandedness, knowledge_cutoff, additional_info, ask_user_question_guidelines, todo_rules (with tools), task_tool_guidelines, citation_requirements, artifacts_rules, skills_and_best_practices, file_creation_advice, producing_outputs, sharing_files, web_content_restrictions, unnecessary_tool_use_avoidance, suggesting_actions, package_management. Semua referensi "Claude" diganti "Dzeck", "Anthropic" diganti "Tim Dzeck".
+- **New Tools — TodoList:** `server/agent/tools/todo.py` — Tools baru: `todo_write` (buat checklist), `todo_update` (tandai item selesai), `todo_read` (baca kemajuan). Menggunakan file todo.md di workspace.
+- **New Tools — Task/Subagent:** `server/agent/tools/task.py` — Tools baru: `task_create` (buat sub-tugas), `task_complete` (tandai selesai), `task_list` (lihat status). Menyimpan task data sebagai JSON di `.tasks/` directory.
+- **Execution Prompt Updated:** `server/agent/prompts/execution.py` — Ditambahkan: clarification_before_work, progress_tracking (todo tools), tool selection guide #10 (todo) dan #11 (task), sub_task_strategy, artifacts_guidance, package_management, tone_rules, citation_rules.
+- **Planner Prompt Updated:** `server/agent/prompts/planner.py` — Tool list diperluas ke 36 tools + idle. Ditambahkan: clarification step, progress tracking step, verification step, sub-task/parallelization guidance, package management rules.
+- **Tool Registry Updated:** `server/agent/tools/registry.py` — Ditambahkan 6 tools baru (todo_write, todo_update, todo_read, task_create, task_complete, task_list) ke TOOLS, TOOLKIT_MAP, dan ALL_TOOL_INSTANCES.
+
 ## Recent Updates (March 2026 — Session 2)
 - **Conversation Memory (Chat History):** Agent sekarang punya memori percakapan lintas pesan dalam sesi yang sama. `respond_directly_async` dan `run_planner_async` menerima parameter `chat_history`. `run_async` memuat history dari SessionService di awal, dan menyimpannya kembali setelah setiap respons. `main()` mem-parse `messages` dari frontend menjadi `chat_history` dan meneruskannya ke agent. History disimpan di Redis (cache) dan MongoDB (persistent).
 - **Browser Screenshots di Tool Cards:** `BrowserContent` di `AgentToolCard.tsx` kini merender `screenshot_b64` (base64 JPEG) yang sudah ditangkap oleh `PlaywrightSession` di `browser.py`. Screenshot ditampilkan sebagai gambar di dalam collapsed tool card.
