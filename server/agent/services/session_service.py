@@ -8,8 +8,11 @@ Orchestrates session lifecycle:
 - Cache hot state to Redis via CacheStore
 - Provide session resume from any point
 """
+import os
+import json
 import uuid
 import logging
+import tempfile
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -17,6 +20,46 @@ from server.agent.db.session_store import SessionStore, get_session_store
 from server.agent.db.cache import CacheStore, get_cache_store
 
 logger = logging.getLogger(__name__)
+
+_WAITING_STATE_DIR = os.path.join(tempfile.gettempdir(), "dzeck_waiting")
+
+
+def _waiting_state_path(session_id: str) -> str:
+    os.makedirs(_WAITING_STATE_DIR, exist_ok=True)
+    safe_id = session_id.replace("/", "_").replace("\\", "_")
+    return os.path.join(_WAITING_STATE_DIR, f"{safe_id}.json")
+
+
+def _file_save_waiting_state(session_id: str, waiting_state: Dict[str, Any]) -> None:
+    path = _waiting_state_path(session_id)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(waiting_state, f, default=str)
+    except Exception as e:
+        logger.warning("[SessionService] File fallback save_waiting_state failed: %s", e)
+
+
+def _file_load_waiting_state(session_id: str) -> Optional[Dict[str, Any]]:
+    path = _waiting_state_path(session_id)
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if data and data.get("waiting_for_user"):
+            return data
+    except Exception as e:
+        logger.warning("[SessionService] File fallback load_waiting_state failed: %s", e)
+    return None
+
+
+def _file_clear_waiting_state(session_id: str) -> None:
+    path = _waiting_state_path(session_id)
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+    except Exception as e:
+        logger.warning("[SessionService] File fallback clear_waiting_state failed: %s", e)
 
 
 class SessionService:
@@ -252,9 +295,8 @@ class SessionService:
         user_message: str,
         chat_history: Optional[List[Dict[str, Any]]] = None,
     ) -> None:
-        """Save waiting_for_user state so the plan can be resumed later."""
-        cache = await self._get_cache_store()
-        store = await self._get_session_store()
+        """Save waiting_for_user state so the plan can be resumed later.
+        Always writes to a temp file as fallback (works without Redis/MongoDB)."""
         waiting_state = {
             "waiting_for_user": True,
             "plan": plan,
@@ -262,35 +304,49 @@ class SessionService:
             "user_message": user_message,
             "chat_history": chat_history or [],
         }
-        await cache.cache_session_state(session_id, waiting_state)
-        await store.update_session(session_id, {"waiting_state": waiting_state, "status": "waiting_for_user"})
+        _file_save_waiting_state(session_id, waiting_state)
+        try:
+            cache = await self._get_cache_store()
+            store = await self._get_session_store()
+            await cache.cache_session_state(session_id, waiting_state)
+            await store.update_session(session_id, {"waiting_state": waiting_state, "status": "waiting_for_user"})
+        except Exception:
+            pass
 
     async def load_waiting_state(
         self,
         session_id: str,
     ) -> Optional[Dict[str, Any]]:
-        """Load waiting_for_user state. Returns None if not waiting."""
-        cache = await self._get_cache_store()
-        cached = await cache.get_session_state(session_id)
-        if cached and cached.get("waiting_for_user"):
-            return cached
-        store = await self._get_session_store()
-        session = await store.get_session(session_id)
-        if session:
-            ws = session.get("waiting_state")
-            if ws and ws.get("waiting_for_user"):
-                return ws
-        return None
+        """Load waiting_for_user state. Returns None if not waiting.
+        Falls back to temp file when Redis/MongoDB is unavailable."""
+        try:
+            cache = await self._get_cache_store()
+            cached = await cache.get_session_state(session_id)
+            if cached and cached.get("waiting_for_user"):
+                return cached
+            store = await self._get_session_store()
+            session = await store.get_session(session_id)
+            if session:
+                ws = session.get("waiting_state")
+                if ws and ws.get("waiting_for_user"):
+                    return ws
+        except Exception:
+            pass
+        return _file_load_waiting_state(session_id)
 
     async def clear_waiting_state(
         self,
         session_id: str,
     ) -> None:
         """Clear the waiting_for_user flag after user has replied."""
-        store = await self._get_session_store()
-        await store.update_session(session_id, {"waiting_state": None, "status": "running"})
-        cache = await self._get_cache_store()
-        await cache.invalidate_session(session_id)
+        _file_clear_waiting_state(session_id)
+        try:
+            store = await self._get_session_store()
+            await store.update_session(session_id, {"waiting_state": None, "status": "running"})
+            cache = await self._get_cache_store()
+            await cache.invalidate_session(session_id)
+        except Exception:
+            pass
 
     async def get_session_events(
         self,

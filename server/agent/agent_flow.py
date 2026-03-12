@@ -867,7 +867,8 @@ class DzeckAgent:
                     await asyncio.sleep(0.008)
                 yield make_event("message_end", role="ask")
             yield make_event("waiting_for_user", text=text or "Menunggu balasan Anda...")
-            yield make_event("done", success=True, waiting_for_user=True, session_id=os.environ.get("DZECK_SESSION_ID", ""))
+            # NOTE: Do NOT yield "done" here — that would prematurely close the SSE stream.
+            # The final "done" is yielded by run_async after saving waiting state.
             yield {"type": "__step_done__"}
             return
 
