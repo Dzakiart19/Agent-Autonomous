@@ -127,7 +127,7 @@ export async function registerRoutes(app: any): Promise<Server> {
 
   // ─── Agent endpoint with SSE ───────────────────────────────────────────────
   app.post("/api/agent", async (req: any, res: any) => {
-    const { message, messages, attachments, session_id, resume_from_session } = req.body;
+    const { message, messages, attachments, session_id, resume_from_session, is_continuation } = req.body;
     if (!message && (!messages || !Array.isArray(messages))) {
       return res.status(400).json({ error: "message or messages array is required" });
     }
@@ -166,6 +166,7 @@ export async function registerRoutes(app: any): Promise<Server> {
       attachments: attachments || [],
       session_id: sid,
       resume_from_session: resume_from_session || null,
+      is_continuation: is_continuation || false,
     }));
     proc.stdin.end();
 

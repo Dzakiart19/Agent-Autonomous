@@ -244,6 +244,54 @@ class SessionService:
             "completed_at": datetime.now(timezone.utc).isoformat(),
         })
 
+    async def save_waiting_state(
+        self,
+        session_id: str,
+        plan: Dict[str, Any],
+        pending_steps: List[Dict[str, Any]],
+        user_message: str,
+        chat_history: Optional[List[Dict[str, Any]]] = None,
+    ) -> None:
+        """Save waiting_for_user state so the plan can be resumed later."""
+        cache = await self._get_cache_store()
+        store = await self._get_session_store()
+        waiting_state = {
+            "waiting_for_user": True,
+            "plan": plan,
+            "pending_steps": pending_steps,
+            "user_message": user_message,
+            "chat_history": chat_history or [],
+        }
+        await cache.cache_session_state(session_id, waiting_state)
+        await store.update_session(session_id, {"waiting_state": waiting_state, "status": "waiting_for_user"})
+
+    async def load_waiting_state(
+        self,
+        session_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Load waiting_for_user state. Returns None if not waiting."""
+        cache = await self._get_cache_store()
+        cached = await cache.get_session_state(session_id)
+        if cached and cached.get("waiting_for_user"):
+            return cached
+        store = await self._get_session_store()
+        session = await store.get_session(session_id)
+        if session:
+            ws = session.get("waiting_state")
+            if ws and ws.get("waiting_for_user"):
+                return ws
+        return None
+
+    async def clear_waiting_state(
+        self,
+        session_id: str,
+    ) -> None:
+        """Clear the waiting_for_user flag after user has replied."""
+        store = await self._get_session_store()
+        await store.update_session(session_id, {"waiting_state": None, "status": "running"})
+        cache = await self._get_cache_store()
+        await cache.invalidate_session(session_id)
+
     async def get_session_events(
         self,
         session_id: str,

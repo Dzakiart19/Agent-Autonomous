@@ -1069,6 +1069,7 @@ class DzeckAgent:
         plan: Plan,
         step: Step,
         user_message: str,
+        user_reply: Optional[str] = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Execute a step and yield SSE events as they happen (AsyncGenerator)."""
         self.state = FlowState.EXECUTING
@@ -1079,6 +1080,8 @@ class DzeckAgent:
         for s in plan.steps:
             if s.is_done() and s.result:
                 context_parts.append("- {}: {}".format(s.description, s.result))
+        if user_reply:
+            context_parts.append("- User replied to agent question: {}".format(user_reply))
         context = "\n".join(context_parts) if context_parts else "No previous context."
 
         prompt = EXECUTION_PROMPT.format(
@@ -1439,6 +1442,7 @@ ONLY respond with JSON. No explanations, no markdown, ONLY the JSON object.
         attachments: Optional[List[str]] = None,
         resume_from_session: Optional[str] = None,
         chat_history: Optional[List[Dict[str, Any]]] = None,
+        is_continuation: bool = False,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         Main async agent flow using AsyncGenerator.
@@ -1478,9 +1482,97 @@ ONLY respond with JSON. No explanations, no markdown, ONLY the JSON object.
                     yield make_event("session", action="resumed", session_id=resume_from_session)
 
             if self.session_id and svc:
+                waiting_state = await svc.load_waiting_state(self.session_id)
+            else:
+                waiting_state = None
+
+            if is_continuation and waiting_state and self.session_id and svc:
+                await svc.clear_waiting_state(self.session_id)
+                self.plan = Plan.from_dict(waiting_state["plan"])
+                original_user_message = waiting_state.get("user_message", user_message)
+
+                yield make_event("plan", status=PlanStatus.RUNNING.value, plan=safe_plan_dict(self.plan))
+
+                step_waiting = False
+                while True:
+                    step = self.plan.get_next_step()
+                    if not step:
+                        break
+
+                    step_waiting = False
+                    async for event in self.execute_step_async(self.plan, step, original_user_message, user_reply=user_message):
+                        if event.get("type") == "waiting_for_user":
+                            step_waiting = True
+                        yield event
+
+                    if self.session_id and svc:
+                        await svc.save_step_completed(self.session_id, step.to_dict())
+
+                    if step_waiting:
+                        pending = [s.to_dict() for s in self.plan.steps if not s.is_done()]
+                        if self.session_id and svc:
+                            await svc.save_waiting_state(
+                                self.session_id,
+                                self.plan.to_dict(),
+                                pending,
+                                original_user_message,
+                                chat_history=self.chat_history,
+                            )
+                            await svc.save_plan_snapshot(self.session_id, self.plan.to_dict())
+                        break
+
+                    next_step = self.plan.get_next_step()
+                    if next_step:
+                        yield make_event("plan", status=PlanStatus.UPDATING.value,
+                                         plan=safe_plan_dict(self.plan))
+                        plan_event = await self.update_plan_async(self.plan, step)
+                        if plan_event:
+                            yield plan_event
+
+                if not step_waiting:
+                    for s in self.plan.steps:
+                        if s.status in (ExecutionStatus.RUNNING, ExecutionStatus.PENDING):
+                            s.status = ExecutionStatus.COMPLETED
+                            s.success = True
+                            if not s.result:
+                                s.result = "Step completed"
+                            yield make_event("step", status=StepStatus.COMPLETED.value, step=s.to_dict())
+
+                    self.plan.status = ExecutionStatus.COMPLETED
+                    yield make_event("plan", status=PlanStatus.COMPLETED.value,
+                                     plan=safe_plan_dict(self.plan))
+
+                    summary_chunks: List[str] = []
+                    async def _summarize_cont():
+                        async for event in self.summarize_async(self.plan, original_user_message):
+                            if event.get("type") == "message_chunk":
+                                summary_chunks.append(event.get("chunk", ""))
+                            yield event
+                    async for event in _summarize_cont():
+                        yield event
+
+                    self.state = FlowState.COMPLETED
+                    summary_text = "".join(summary_chunks)
+                    if summary_text:
+                        self.chat_history.append({"role": "user", "content": original_user_message})
+                        self.chat_history.append({"role": "assistant", "content": summary_text})
+                        if self.session_id and svc:
+                            try:
+                                await svc.save_chat_history(self.session_id, self.chat_history[-40:])
+                            except Exception:
+                                pass
+                    if self.session_id and svc:
+                        await svc.complete_session(self.session_id, success=True)
+                    if self._created_files:
+                        yield make_event("files", files=self._created_files)
+
+                yield make_event("done", success=True, session_id=self.session_id)
+                return
+
+            if not waiting_state and self.session_id and svc:
                 await svc.create_session(user_message, session_id=self.session_id)
 
-            if not attachments and self._is_simple_query(user_message):
+            if not is_continuation and not attachments and self._is_simple_query(user_message):
                 assistant_reply = []
 
                 async def _collect_and_yield():
@@ -1535,16 +1627,33 @@ ONLY respond with JSON. No explanations, no markdown, ONLY the JSON object.
 
             yield make_event("plan", status=PlanStatus.RUNNING.value, plan=safe_plan_dict(self.plan))
 
+            step_waiting = False
             while True:
                 step = self.plan.get_next_step()
                 if not step:
                     break
 
+                step_waiting = False
                 async for event in self.execute_step_async(self.plan, step, user_message):
+                    if event.get("type") == "waiting_for_user":
+                        step_waiting = True
                     yield event
 
                 if self.session_id and svc:
                     await svc.save_step_completed(self.session_id, step.to_dict())
+
+                if step_waiting:
+                    pending = [s.to_dict() for s in self.plan.steps if not s.is_done()]
+                    if self.session_id and svc:
+                        await svc.save_waiting_state(
+                            self.session_id,
+                            self.plan.to_dict(),
+                            pending,
+                            user_message,
+                            chat_history=self.chat_history,
+                        )
+                        await svc.save_plan_snapshot(self.session_id, self.plan.to_dict())
+                    break
 
                 next_step = self.plan.get_next_step()
                 if next_step:
@@ -1554,49 +1663,47 @@ ONLY respond with JSON. No explanations, no markdown, ONLY the JSON object.
                     if plan_event:
                         yield plan_event
 
-            # Mark any steps still in running/pending state as completed before
-            # emitting the final plan event so the UI stays in sync with the answer
-            for s in self.plan.steps:
-                if s.status in (ExecutionStatus.RUNNING, ExecutionStatus.PENDING):
-                    s.status = ExecutionStatus.COMPLETED
-                    s.success = True
-                    if not s.result:
-                        s.result = "Step completed"
-                    yield make_event("step", status=StepStatus.COMPLETED.value, step=s.to_dict())
+            if not step_waiting:
+                for s in self.plan.steps:
+                    if s.status in (ExecutionStatus.RUNNING, ExecutionStatus.PENDING):
+                        s.status = ExecutionStatus.COMPLETED
+                        s.success = True
+                        if not s.result:
+                            s.result = "Step completed"
+                        yield make_event("step", status=StepStatus.COMPLETED.value, step=s.to_dict())
 
-            self.plan.status = ExecutionStatus.COMPLETED
-            yield make_event("plan", status=PlanStatus.COMPLETED.value,
-                             plan=safe_plan_dict(self.plan))
+                self.plan.status = ExecutionStatus.COMPLETED
+                yield make_event("plan", status=PlanStatus.COMPLETED.value,
+                                 plan=safe_plan_dict(self.plan))
 
-            summary_chunks: List[str] = []
+                summary_chunks: List[str] = []
 
-            async def _summarize_and_collect():
-                async for event in self.summarize_async(self.plan, user_message):
-                    if event.get("type") == "message_chunk":
-                        summary_chunks.append(event.get("chunk", ""))
+                async def _summarize_and_collect():
+                    async for event in self.summarize_async(self.plan, user_message):
+                        if event.get("type") == "message_chunk":
+                            summary_chunks.append(event.get("chunk", ""))
+                        yield event
+
+                async for event in _summarize_and_collect():
                     yield event
 
-            async for event in _summarize_and_collect():
-                yield event
+                self.state = FlowState.COMPLETED
 
-            self.state = FlowState.COMPLETED
+                summary_text = "".join(summary_chunks)
+                if summary_text:
+                    self.chat_history.append({"role": "user", "content": user_message})
+                    self.chat_history.append({"role": "assistant", "content": summary_text})
+                    if self.session_id and svc:
+                        try:
+                            await svc.save_chat_history(self.session_id, self.chat_history[-40:])
+                        except Exception:
+                            pass
 
-            # Save chat history after plan-act completion
-            summary_text = "".join(summary_chunks)
-            if summary_text:
-                self.chat_history.append({"role": "user", "content": user_message})
-                self.chat_history.append({"role": "assistant", "content": summary_text})
                 if self.session_id and svc:
-                    try:
-                        await svc.save_chat_history(self.session_id, self.chat_history[-40:])
-                    except Exception:
-                        pass
+                    await svc.complete_session(self.session_id, success=True)
 
-            if self.session_id and svc:
-                await svc.complete_session(self.session_id, success=True)
-
-            if self._created_files:
-                yield make_event("files", files=self._created_files)
+                if self._created_files:
+                    yield make_event("files", files=self._created_files)
 
             yield make_event("done", success=True, session_id=self.session_id)
 
@@ -1622,6 +1729,7 @@ async def run_agent_async(
     session_id: Optional[str] = None,
     resume_from_session: Optional[str] = None,
     chat_history: Optional[List[Dict[str, Any]]] = None,
+    is_continuation: bool = False,
 ) -> AsyncGenerator[Dict[str, Any], None]:
     """
     Public entry point for running the agent as an async generator.
@@ -1633,6 +1741,7 @@ async def run_agent_async(
         attachments=attachments,
         resume_from_session=resume_from_session,
         chat_history=chat_history,
+        is_continuation=is_continuation,
     ):
         yield event
 
@@ -1651,6 +1760,7 @@ def main() -> None:
         attachments = input_data.get("attachments", [])
         session_id = input_data.get("session_id")
         resume_from_session = input_data.get("resume_from_session")
+        is_continuation = bool(input_data.get("is_continuation", False))
 
         if messages and not user_message:
             for msg in reversed(messages):
@@ -1688,6 +1798,7 @@ def main() -> None:
                 session_id=session_id,
                 resume_from_session=resume_from_session,
                 chat_history=chat_history or None,
+                is_continuation=is_continuation,
             ):
                 line = json.dumps(event, default=str)
                 sys.stdout.write(line + "\n")

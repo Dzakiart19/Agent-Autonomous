@@ -375,6 +375,8 @@ export function ChatPage({
       attachments: attachments.length > 0 ? attachments : undefined,
     };
 
+    const wasContinuation = isWaitingForUser;
+
     setMessages(prev => [...prev, userMsg]);
     const msgText = inputMessage.trim();
     setInputMessage("");
@@ -382,9 +384,11 @@ export function ChatPage({
     isWaitingRef.current = false;
     setIsWaitingForUser(false);
     setTools([]);
-    setStepHistory([]);
-    planMsgIdRef.current = null;
-    currentPlanRef.current = null;
+    if (!wasContinuation) {
+      setStepHistory([]);
+      planMsgIdRef.current = null;
+      currentPlanRef.current = null;
+    }
     setThinking({ active: true, label: isAgentMode ? "Dzeck sedang berpikir..." : "Memikirkan jawaban..." });
 
     try {
@@ -401,6 +405,7 @@ export function ChatPage({
             model: "@cf/meta/llama-3.1-70b-instruct",
             attachments: [],
             session_id: activeSessionIdRef.current,
+            is_continuation: wasContinuation,
           },
           {
             onMessage: handleEvent,

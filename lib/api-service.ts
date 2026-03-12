@@ -41,6 +41,7 @@ export interface AgentRequest {
   model?: string;
   attachments?: any[];
   session_id?: string;
+  is_continuation?: boolean;
 }
 
 export interface AgentCallbacks {
@@ -99,6 +100,7 @@ class ApiService {
           model: request.model || "@cf/meta/llama-3.1-70b-instruct",
           attachments: request.attachments || [],
           session_id: request.session_id,
+          is_continuation: request.is_continuation || false,
         }),
       });
 
