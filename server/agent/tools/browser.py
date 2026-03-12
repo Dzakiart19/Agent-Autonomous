@@ -414,10 +414,12 @@ class PlaywrightSession:
                 self.current_url = self._page.url
                 title = self._page.title()
                 content = self._page.inner_text("body")[:8000]
+                screenshot_b64 = self._capture_screenshot_b64()
                 return ToolResult(
                     success=True,
                     message="Page: {}\nURL: {}\n\n{}".format(title, self.current_url, content),
-                    data={"url": self.current_url, "title": title, "content": content},
+                    data={"url": self.current_url, "title": title, "content": content,
+                          "screenshot_b64": screenshot_b64 or ""},
                 )
             except Exception as e:
                 last_err = e
@@ -439,10 +441,12 @@ class PlaywrightSession:
         try:
             content = self._page.inner_text("body")[:8000]
             title = self._page.title()
+            screenshot_b64 = self._capture_screenshot_b64()
             return ToolResult(
                 success=True,
                 message="Page: {}\nURL: {}\n\n{}".format(title, self.current_url, content),
-                data={"url": self.current_url, "title": title, "content": content},
+                data={"url": self.current_url, "title": title, "content": content,
+                      "screenshot_b64": screenshot_b64 or ""},
             )
         except Exception as e:
             return ToolResult(success=False, message="View failed: {}".format(e))
@@ -457,10 +461,12 @@ class PlaywrightSession:
             self.current_url = self._page.url
             title = self._page.title()
             content = self._page.inner_text("body")[:6000]
+            screenshot_b64 = self._capture_screenshot_b64()
             return ToolResult(
                 success=True,
                 message="Clicked ({}, {}). Page: {}\nURL: {}\n\n{}".format(x, y, title, self.current_url, content),
-                data={"x": x, "y": y, "button": button, "url": self.current_url, "title": title, "content": content},
+                data={"x": x, "y": y, "button": button, "url": self.current_url, "title": title,
+                      "content": content, "screenshot_b64": screenshot_b64 or ""},
             )
         except Exception as e:
             return ToolResult(success=False, message="Click failed: {}".format(e))
@@ -471,10 +477,11 @@ class PlaywrightSession:
         try:
             self._page.keyboard.type(text)
             self._page.wait_for_timeout(500)
+            screenshot_b64 = self._capture_screenshot_b64()
             return ToolResult(
                 success=True,
                 message="Typed: {}".format(repr(text)),
-                data={"text": text, "url": self.current_url},
+                data={"text": text, "url": self.current_url, "screenshot_b64": screenshot_b64 or ""},
             )
         except Exception as e:
             return ToolResult(success=False, message="Type failed: {}".format(e))
@@ -487,10 +494,12 @@ class PlaywrightSession:
             self._page.mouse.wheel(0, delta_y)
             self._page.wait_for_timeout(500)
             content = self._page.inner_text("body")[:4000]
+            screenshot_b64 = self._capture_screenshot_b64()
             return ToolResult(
                 success=True,
                 message="Scrolled {}.\n\n{}".format(direction, content),
-                data={"direction": direction, "amount": amount, "url": self.current_url},
+                data={"direction": direction, "amount": amount, "url": self.current_url,
+                      "screenshot_b64": screenshot_b64 or ""},
             )
         except Exception as e:
             return ToolResult(success=False, message="Scroll failed: {}".format(e))

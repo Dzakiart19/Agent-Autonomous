@@ -223,6 +223,21 @@ class CacheStore:
         key = f"session:memory:{session_id}"
         return await self.get(key)
 
+    async def cache_chat_history(
+        self,
+        session_id: str,
+        history: list,
+        ttl: int = 86400,
+    ) -> bool:
+        """Cache conversation history (user+assistant turns) for a session."""
+        key = f"session:chat:{session_id}"
+        return await self.set(key, history, ttl=ttl)
+
+    async def get_chat_history(self, session_id: str) -> Optional[list]:
+        """Retrieve cached conversation history."""
+        key = f"session:chat:{session_id}"
+        return await self.get(key)
+
     async def close(self) -> None:
         """Close the Redis connection."""
         if self._client:

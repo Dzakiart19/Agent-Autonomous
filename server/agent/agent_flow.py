@@ -490,6 +490,7 @@ def build_tool_content(tool_name: str, tool_result: ToolResult) -> Optional[Dict
             "title": data.get("title", ""),
             "content": str(data.get("content", data.get("content_snippet", "")))[:2000],
             "save_path": data.get("save_path", ""),
+            "screenshot_b64": data.get("screenshot_b64", ""),
         }
     elif tool_name in ("file_read", "file_write", "file_str_replace",
                        "file_find_by_name", "file_find_in_content",
@@ -551,6 +552,7 @@ class DzeckAgent:
         self.parser = RobustJsonParser()
         self._session_service: Any = None
         self._created_files: List[Dict[str, Any]] = []
+        self.chat_history: List[Dict[str, Any]] = []
 
     async def _get_session_service(self) -> Any:
         """Lazy-load session service."""

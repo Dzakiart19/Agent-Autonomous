@@ -154,6 +154,32 @@ class SessionService:
         memory = await cache.get_memory(session_id)
         return memory or []
 
+    async def save_chat_history(
+        self,
+        session_id: str,
+        history: List[Dict[str, Any]],
+    ) -> None:
+        """Save full conversation history (user+assistant turns) — persists across messages."""
+        cache = await self._get_cache_store()
+        await cache.cache_chat_history(session_id, history)
+        store = await self._get_session_store()
+        await store.update_session(session_id, {"chat_history": history})
+
+    async def load_chat_history(
+        self,
+        session_id: str,
+    ) -> List[Dict[str, Any]]:
+        """Load conversation history — checks Redis first, then MongoDB."""
+        cache = await self._get_cache_store()
+        history = await cache.get_chat_history(session_id)
+        if history is not None:
+            return history
+        store = await self._get_session_store()
+        session = await store.get_session(session_id)
+        if session:
+            return session.get("chat_history", [])
+        return []
+
     async def resume_session(
         self,
         session_id: str,
