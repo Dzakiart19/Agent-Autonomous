@@ -565,6 +565,88 @@ class DzeckAgent:
                 sys.stderr.flush()
         return self._session_service
 
+    async def _pre_plan_clarification_check(
+        self,
+        user_message: str,
+        chat_history: Optional[List[Dict[str, Any]]] = None,
+    ) -> Optional[str]:
+        """
+        Before creating any plan, quickly check if the user's request is too vague
+        to act on without clarification. If yes, return the clarification question
+        to ask. If the request is clear enough, return None.
+        """
+        sys_msg = {
+            "role": "system",
+            "content": (
+                "Kamu adalah asisten yang membantu menentukan apakah permintaan user cukup spesifik "
+                "untuk dikerjakan langsung, atau perlu klarifikasi terlebih dahulu.\n\n"
+                "Jawab HANYA dengan JSON valid:\n"
+                "{\"needs_clarification\": true/false, \"question\": \"pertanyaan klarifikasi jika perlu\"}\n\n"
+                "Perlu klarifikasi JIKA permintaan terlalu umum dan detail penting tidak diketahui, "
+                "misalnya: 'buat script Python' (tapi tidak tahu untuk apa), "
+                "'buat presentasi' (tapi tidak tahu topik/slide/tujuannya), "
+                "'kumpulkan riset' (tapi tidak tahu tentang apa).\n\n"
+                "TIDAK perlu klarifikasi JIKA: permintaan sudah spesifik, "
+                "user sudah menyebutkan tujuan/detail yang cukup, "
+                "atau ini pertanyaan faktual sederhana."
+            ),
+        }
+        messages: List[Dict[str, Any]] = [sys_msg]
+        if chat_history:
+            for h in (chat_history or [])[-6:]:
+                role = h.get("role", "")
+                content = h.get("content", "")
+                if role in ("user", "assistant") and content:
+                    messages.append({"role": role, "content": str(content)[:800]})
+        messages.append({
+            "role": "user",
+            "content": "Permintaan user: \"{}\"".format(user_message),
+        })
+        try:
+            loop = asyncio.get_event_loop()
+            url = _get_cf_url()
+            body = {"messages": messages, "max_tokens": 200, "stream": False}
+            data = json.dumps(body).encode("utf-8")
+            req = urllib.request.Request(
+                url, data=data,
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": "Bearer {}".format(CF_API_KEY),
+                    "User-Agent": "DzeckAI/2.0",
+                },
+                method="POST",
+            )
+
+            def _do_request() -> Optional[str]:
+                try:
+                    with urllib.request.urlopen(req, timeout=15) as resp:
+                        raw = resp.read().decode("utf-8", errors="replace")
+                        parsed = json.loads(raw)
+                        content = (
+                            parsed.get("result", {}).get("response")
+                            or parsed.get("response")
+                            or (parsed.get("choices", [{}])[0].get("message", {}).get("content"))
+                            or ""
+                        )
+                        if not content:
+                            return None
+                        content = content.strip()
+                        if content.startswith("```"):
+                            content = content.split("```")[1]
+                            if content.startswith("json"):
+                                content = content[4:]
+                        result = json.loads(content)
+                        if result.get("needs_clarification") and result.get("question"):
+                            return str(result["question"])
+                        return None
+                except Exception as e:
+                    sys.stderr.write("[agent] Clarification check error: {}\n".format(e))
+                    return None
+
+            return await loop.run_in_executor(None, _do_request)
+        except Exception:
+            return None
+
     async def _persist_event(self, event_type: str, data: Dict[str, Any]) -> None:
         """Persist event to MongoDB (non-blocking, best-effort)."""
         if not self.session_id:
