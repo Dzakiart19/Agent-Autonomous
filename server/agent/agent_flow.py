@@ -622,12 +622,23 @@ class DzeckAgent:
                     with urllib.request.urlopen(req, timeout=15) as resp:
                         raw = resp.read().decode("utf-8", errors="replace")
                         parsed = json.loads(raw)
-                        content = (
-                            parsed.get("result", {}).get("response")
-                            or parsed.get("response")
-                            or (parsed.get("choices", [{}])[0].get("message", {}).get("content"))
-                            or ""
-                        )
+                        content = None
+                        result_obj = parsed.get("result")
+                        if isinstance(result_obj, dict):
+                            r = result_obj.get("response")
+                            if isinstance(r, str):
+                                content = r
+                        if not content:
+                            r = parsed.get("response")
+                            if isinstance(r, str):
+                                content = r
+                        if not content:
+                            choices = parsed.get("choices")
+                            if isinstance(choices, list) and choices:
+                                msg = choices[0].get("message", {}) if isinstance(choices[0], dict) else {}
+                                r = msg.get("content") if isinstance(msg, dict) else None
+                                if isinstance(r, str):
+                                    content = r
                         if not content:
                             return None
                         content = content.strip()
