@@ -56,6 +56,19 @@ def clear_file_cache() -> None:
     logger.info("[E2B] File cache cleared.")
 
 
+def get_cached_file_path(filepath: str) -> Optional[str]:
+    """Check if a file path (or its resolved variant) exists in the file cache.
+    Returns the matching cache key if found, or None."""
+    resolved = _resolve_sandbox_path(filepath) if not filepath.startswith("/") else os.path.normpath(filepath)
+    with _file_cache_lock:
+        if resolved in _file_cache:
+            return resolved
+        for key in _file_cache:
+            if os.path.normpath(key) == resolved:
+                return key
+    return None
+
+
 def _is_sandbox_alive(sb: Any) -> bool:
     """Quick health check for the sandbox."""
     try:
@@ -267,29 +280,74 @@ def list_output_files() -> list:
         return []
 
 
+def _resolve_sandbox_path(path: str) -> str:
+    """Resolve a path to an absolute sandbox path under WORKSPACE_DIR."""
+    if not path.startswith("/"):
+        return os.path.normpath(os.path.join(WORKSPACE_DIR, path))
+    return os.path.normpath(path)
+
+
 def write_file(path: str, content: str, append: bool = False) -> bool:
-    """Write a file to the E2B sandbox. If append=True, appends to existing content."""
+    """Write a file to the E2B sandbox with retry. If append=True, appends to existing content."""
+    path = _resolve_sandbox_path(path)
+    max_retries = 2
+    last_error = None
+    for attempt in range(1, max_retries + 1):
+        sb = get_sandbox()
+        if sb is None:
+            last_error = "E2B sandbox not available"
+            logger.error("[E2B] write_file failed: sandbox not available (attempt %d/%d)", attempt, max_retries)
+            continue
+        try:
+            import shlex
+            parent = "/".join(path.split("/")[:-1])
+            if parent:
+                sb.commands.run(f"mkdir -p {shlex.quote(parent)}", timeout=10)
+            write_content = content
+            if append:
+                existing = ""
+                try:
+                    existing = sb.files.read(path) or ""
+                except Exception:
+                    pass
+                write_content = existing + content
+            sb.files.write(path, write_content)
+            verify = sb.commands.run(f"test -f {shlex.quote(path)} && echo EXISTS", timeout=10)
+            if verify.exit_code != 0 or "EXISTS" not in (verify.stdout or ""):
+                raise RuntimeError(f"File verification failed after write: {path}")
+            _cache_file(path, write_content)
+            return True
+        except Exception as e:
+            last_error = str(e)
+            logger.warning("[E2B] Failed to write file %s (attempt %d/%d): %s", path, attempt, max_retries, e)
+            if attempt < max_retries:
+                global _sandbox
+                _sandbox = None
+                time.sleep(1)
+    logger.error("[E2B] All write attempts failed for %s: %s", path, last_error)
+    return False
+
+
+def ensure_file_in_sandbox(filepath: str) -> bool:
+    """Ensure a file exists in the E2B sandbox. If missing, restore from _file_cache."""
+    filepath = _resolve_sandbox_path(filepath)
     sb = get_sandbox()
     if sb is None:
         return False
     try:
         import shlex
-        parent = "/".join(path.split("/")[:-1])
-        if parent:
-            sb.commands.run(f"mkdir -p {shlex.quote(parent)}", timeout=10)
-        if append:
-            existing = ""
-            try:
-                existing = sb.files.read(path) or ""
-            except Exception:
-                pass
-            content = existing + content
-        sb.files.write(path, content)
-        _cache_file(path, content)
-        return True
-    except Exception as e:
-        logger.warning("[E2B] Failed to write file %s: %s", path, e)
-        return False
+        check = sb.commands.run(f"test -f {shlex.quote(filepath)} && echo EXISTS", timeout=10)
+        if check.exit_code == 0 and "EXISTS" in (check.stdout or ""):
+            return True
+    except Exception:
+        pass
+    with _file_cache_lock:
+        cached_content = _file_cache.get(filepath)
+    if cached_content is not None:
+        logger.info("[E2B] File %s missing in sandbox, restoring from cache...", filepath)
+        return write_file(filepath, cached_content, append=False)
+    logger.warning("[E2B] File %s not found in sandbox and not in cache.", filepath)
+    return False
 
 
 def sync_file_to_sandbox(local_path: str, sandbox_path: str = "") -> bool:

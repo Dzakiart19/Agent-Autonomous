@@ -230,10 +230,45 @@ def _extract_output_paths_from_command(command: str) -> list:
     return unique
 
 
+def _preflight_ensure_scripts(command: str, exec_dir: str = "/home/user/dzeck-ai") -> Optional[str]:
+    """Before executing a python script command in E2B, ensure the script file exists in the sandbox.
+    Returns an error message string if the file cannot be ensured, or None on success."""
+    if not E2B_ENABLED:
+        return None
+    import re
+    match = re.search(r'python[3]?\s+(?:-\w+\s+)*([^\s;|&]+\.py)', command)
+    if not match:
+        return None
+    script_path = match.group(1)
+    try:
+        from server.agent.tools.e2b_sandbox import ensure_file_in_sandbox, WORKSPACE_DIR, get_cached_file_path
+        import os as _os
+        if not script_path.startswith("/"):
+            resolved_exec = _os.path.normpath(_os.path.join(exec_dir or WORKSPACE_DIR, script_path))
+            resolved_ws = _os.path.normpath(_os.path.join(WORKSPACE_DIR, script_path))
+            cached_exec = get_cached_file_path(resolved_exec)
+            cached_ws = get_cached_file_path(resolved_ws) if resolved_ws != resolved_exec else None
+            if cached_exec:
+                resolved = cached_exec
+            elif cached_ws:
+                resolved = cached_ws
+            else:
+                resolved = resolved_exec
+        else:
+            resolved = script_path
+        ok = ensure_file_in_sandbox(resolved)
+        if not ok:
+            return f"Script file '{resolved}' not found in E2B sandbox and could not be restored. Please write the file first using file_write."
+        return None
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning("[Shell] Pre-flight script check failed for %s: %s", script_path, e)
+        return f"Pre-flight script check error for '{script_path}': {e}. Please ensure the file exists in E2B sandbox."
+
+
 def shell_exec(command: str, exec_dir: str = "/home/user/dzeck-ai", id: str = "default") -> ToolResult:
     """Execute a shell command. Uses E2B cloud sandbox when available, else local."""
 
-    # Intercept GUI commands early — they would hang forever in a headless environment
     gui_detected = _is_gui_command(command)
     if gui_detected:
         msg = (
@@ -252,6 +287,14 @@ def shell_exec(command: str, exec_dir: str = "/home/user/dzeck-ai", id: str = "d
         )
 
     if E2B_ENABLED:
+        preflight_err = _preflight_ensure_scripts(command, exec_dir=exec_dir)
+        if preflight_err:
+            return ToolResult(
+                success=False,
+                message=preflight_err,
+                data={"stdout": "", "stderr": preflight_err, "return_code": 1,
+                      "command": command, "id": id, "error": "script_not_found"},
+            )
         res = _run_e2b(command, exec_dir=exec_dir)
     else:
         res = _run_local(command, exec_dir=exec_dir)

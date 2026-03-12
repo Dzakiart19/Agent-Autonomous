@@ -101,12 +101,8 @@ def file_read(
         file_content = None
         if _e2b_enabled:
             try:
-                from server.agent.tools.e2b_sandbox import read_file as e2b_read, WORKSPACE_DIR as _WS
-                sandbox_path = file
-                if not file.startswith("/"):
-                    sandbox_path = os.path.join(_WS, file)
-                elif not is_sandbox_path and not file.startswith("/tmp"):
-                    sandbox_path = os.path.join(_WS, os.path.basename(file))
+                from server.agent.tools.e2b_sandbox import read_file as e2b_read, _resolve_sandbox_path
+                sandbox_path = _resolve_sandbox_path(file)
                 file_content = e2b_read(sandbox_path)
             except Exception:
                 pass
@@ -173,24 +169,28 @@ def file_write(
         is_output_path = "/output/" in file or file.startswith("/home/user/dzeck-ai/output")
 
         e2b_ok = False
+        e2b_error = ""
         if _e2b_enabled:
             try:
-                from server.agent.tools.e2b_sandbox import write_file as e2b_write, WORKSPACE_DIR
-                sandbox_path = file
-                if not file.startswith("/"):
-                    sandbox_path = os.path.join(WORKSPACE_DIR, file)
-                elif not is_sandbox_path and not file.startswith("/tmp"):
-                    sandbox_path = os.path.join(WORKSPACE_DIR, os.path.basename(file))
+                from server.agent.tools.e2b_sandbox import write_file as e2b_write, _resolve_sandbox_path
+                sandbox_path = _resolve_sandbox_path(file)
                 e2b_ok = e2b_write(sandbox_path, write_content, append=append)
+                if not e2b_ok:
+                    e2b_error = f"E2B sandbox write failed for {sandbox_path} after retries."
             except Exception as e:
                 e2b_ok = False
+                e2b_error = str(e)
+
+        if _e2b_enabled and not e2b_ok:
+            return ToolResult(
+                success=False,
+                message=f"Failed to write file to E2B sandbox: {file}. {e2b_error}\nPlease retry or check E2B sandbox status.",
+                data={"error": e2b_error, "file": file, "e2b_write_failed": True},
+            )
 
         is_deliverable = is_output_path or file.startswith("/tmp/dzeck_files")
 
         if _e2b_enabled:
-            # Saat E2B aktif: semua file disimpan di sandbox E2B.
-            # Locally hanya disimpan di DZECK_FILES_DIR (temp) untuk keperluan download,
-            # TIDAK menulis ke project lokal sama sekali.
             local_path = os.path.join(DZECK_FILES_DIR, os.path.basename(file))
             is_deliverable = True
         elif is_deliverable:
@@ -216,8 +216,6 @@ def file_write(
         msg = f"File {operation} successfully: {file} ({len(write_content)} bytes)"
         if _e2b_enabled and e2b_ok:
             msg += "\n✅ File tersimpan di E2B sandbox (tidak di project lokal)."
-        elif _e2b_enabled and not e2b_ok:
-            msg += "\n⚠️ Warning: E2B sandbox write failed. File disimpan sementara di temp folder."
         if is_deliverable and download_url:
             msg += "\n📎 File siap didownload."
 
@@ -253,12 +251,8 @@ def file_str_replace(
         content = None
         if _e2b_enabled:
             try:
-                from server.agent.tools.e2b_sandbox import read_file as e2b_read, WORKSPACE_DIR as _WS
-                sandbox_path = file
-                if not file.startswith("/"):
-                    sandbox_path = os.path.join(_WS, file)
-                elif not is_sandbox_path and not file.startswith("/tmp"):
-                    sandbox_path = os.path.join(_WS, os.path.basename(file))
+                from server.agent.tools.e2b_sandbox import read_file as e2b_read, _resolve_sandbox_path
+                sandbox_path = _resolve_sandbox_path(file)
                 content = e2b_read(sandbox_path)
             except Exception:
                 pass
@@ -285,14 +279,22 @@ def file_str_replace(
         new_content = content.replace(old_str, new_str)
 
         if _e2b_enabled:
+            e2b_replace_ok = False
+            e2b_replace_err = ""
             try:
-                from server.agent.tools.e2b_sandbox import write_file as e2b_write, WORKSPACE_DIR
-                sandbox_path = file
-                if not file.startswith("/"):
-                    sandbox_path = os.path.join(WORKSPACE_DIR, file)
-                e2b_write(sandbox_path, new_content)
-            except Exception:
-                pass
+                from server.agent.tools.e2b_sandbox import write_file as e2b_write, _resolve_sandbox_path as _rsp
+                sandbox_path = _rsp(file)
+                e2b_replace_ok = e2b_write(sandbox_path, new_content)
+                if not e2b_replace_ok:
+                    e2b_replace_err = f"E2B sandbox write failed for {sandbox_path} after retries."
+            except Exception as e:
+                e2b_replace_err = str(e)
+            if not e2b_replace_ok:
+                return ToolResult(
+                    success=False,
+                    message=f"Failed to write replaced content to E2B sandbox: {file}. {e2b_replace_err}",
+                    data={"error": e2b_replace_err, "file": file, "e2b_write_failed": True},
+                )
 
         is_output_path = "/output/" in file or file.startswith("/home/user/dzeck-ai/output")
         is_deliverable = is_output_path or file.startswith("/tmp/dzeck_files")
