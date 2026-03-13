@@ -481,9 +481,15 @@ class PlaywrightSession:
                 if self._connect_cdp(cdp_url):
                     return True
 
-            logger.warning("[Browser] CDP unavailable — falling back to headless Chromium")
-            if self._launch_headless():
-                return True
+            if E2B_ENABLED:
+                logger.warning("[Browser] CDP unavailable and E2B is enabled — refusing local headless fallback")
+                self._stop_pw()
+                self._started = False
+                return False
+            else:
+                logger.warning("[Browser] CDP unavailable — falling back to headless Chromium")
+                if self._launch_headless():
+                    return True
 
             logger.error("[Browser] All browser start methods failed")
             self._stop_pw()
@@ -821,33 +827,58 @@ def _remap_to_local_path(path: str) -> str:
     return path
 
 
+class _E2BRequiredBrowserStub:
+    """Stub that returns clear errors when no browser backend is available.
+    Method signatures must match actual browser session APIs used by browser_* functions.
+    """
+    _E2B_ERR = "[Browser] E2B sandbox is not available (E2B_API_KEY not set). Browser operations require E2B sandbox."
+
+    _page = None
+
+    def navigate(self, url: str) -> ToolResult:
+        return ToolResult(success=False, message=self._E2B_ERR)
+
+    def view(self) -> ToolResult:
+        return ToolResult(success=False, message=self._E2B_ERR)
+
+    def click(self, x: float = 0, y: float = 0, button: str = "left") -> ToolResult:
+        return ToolResult(success=False, message=self._E2B_ERR)
+
+    def type_text(self, text: str) -> ToolResult:
+        return ToolResult(success=False, message=self._E2B_ERR)
+
+    def scroll(self, direction: str = "down", amount: int = 3) -> ToolResult:
+        return ToolResult(success=False, message=self._E2B_ERR)
+
+    def console_view(self, max_lines: int = 100) -> ToolResult:
+        return ToolResult(success=False, message=self._E2B_ERR)
+
+    def save_screenshot(self, path: str) -> ToolResult:
+        return ToolResult(success=False, message=self._E2B_ERR)
+
+    def disconnect(self) -> None:
+        pass
+
+
 def _make_session() -> Any:
     """Create the best available browser session.
-    Priority: Local Playwright (CDP/VNC > headless fallback) > E2B > HTTP fallback.
+    E2B-only mode: refuses local fallbacks when E2B is configured.
     """
-    if _playwright_available and PLAYWRIGHT_ENABLED:
-        sess = PlaywrightSession()
-        if sess.start():
-            mode = "VNC CDP" if not sess._headless else "headless"
-            logger.info("[Browser] Using local Playwright (%s).", mode)
-            return sess
-        sess.disconnect()
-        logger.warning("[Browser] Local Playwright failed — trying auto-install chromium...")
-        if _install_playwright_chromium():
-            sess2 = PlaywrightSession()
-            if sess2.start():
-                mode2 = "VNC CDP" if not sess2._headless else "headless"
-                logger.info("[Browser] Playwright ready after auto-install (%s).", mode2)
-                return sess2
-            sess2.disconnect()
-        logger.warning("[Browser] Local Playwright still unavailable.")
-
     if E2B_ENABLED:
-        logger.info("[Browser] Falling back to E2B cloud browser (persistent CDP, non-VNC fallback).")
+        if _playwright_available and PLAYWRIGHT_ENABLED:
+            sess = PlaywrightSession()
+            if sess.start() and not sess._headless:
+                logger.info("[Browser] Using Playwright via CDP/VNC (E2B mode).")
+                return sess
+            sess.disconnect()
+
+        logger.info("[Browser] Using E2B cloud browser (persistent CDP).")
         return E2BBrowserSession()
 
-    logger.warning("[Browser] Using HTTP fallback (no screenshots, no JS).")
-    return HTTPBrowserSession()
+    if not E2B_ENABLED:
+        logger.error("[Browser] E2B sandbox not available (E2B_API_KEY not set). "
+                     "Browser operations require E2B sandbox for security.")
+        return _E2BRequiredBrowserStub()
 
 
 # ─── Public Tool Functions ─────────────────────────────────────────────────────
@@ -904,8 +935,8 @@ def browser_move_mouse(coordinate_x: float, coordinate_y: float) -> ToolResult:
         except Exception as e:
             return ToolResult(success=False, message="Move mouse failed: {}".format(e))
     return ToolResult(
-        success=True,
-        message="Mouse move to ({}, {}).".format(coordinate_x, coordinate_y),
+        success=False,
+        message="[Browser] No active browser session available. E2B sandbox required for browser operations.",
     )
 
 
@@ -918,7 +949,7 @@ def browser_press_key(key: str) -> ToolResult:
             return ToolResult(success=True, message="Pressed key: {}".format(key))
         except Exception as e:
             return ToolResult(success=False, message="Press key failed: {}".format(e))
-    return ToolResult(success=True, message="Key press simulated: {}".format(key))
+    return ToolResult(success=False, message="[Browser] No active browser session available. E2B sandbox required for browser operations.")
 
 
 def browser_select_option(index: int, option: int) -> ToolResult:
@@ -929,7 +960,7 @@ def browser_select_option(index: int, option: int) -> ToolResult:
             selects = b._page.query_selector_all("select")
             if index < 0 or index >= len(selects):
                 return ToolResult(
-                    success=True,
+                    success=False,
                     message="Tidak ada dropdown di index {}. Ditemukan {} dropdown.".format(index, len(selects)),
                     data={"dropdown_index": index, "found": len(selects), "selected": False},
                 )
@@ -937,7 +968,7 @@ def browser_select_option(index: int, option: int) -> ToolResult:
             options = select_el.query_selector_all("option")
             if option < 0 or option >= len(options):
                 return ToolResult(
-                    success=True,
+                    success=False,
                     message="Tidak ada option di index {}.".format(option),
                     data={"dropdown_index": index, "option_index": option, "found": len(options), "selected": False},
                 )
@@ -950,13 +981,13 @@ def browser_select_option(index: int, option: int) -> ToolResult:
             )
         except Exception as e:
             return ToolResult(
-                success=True,
-                message="Select option: {}".format(e),
+                success=False,
+                message="Select option failed: {}".format(e),
                 data={"error": str(e), "selected": False},
             )
     return ToolResult(
-        success=True,
-        message="Select option tidak tersedia di mode ini.",
+        success=False,
+        message="[Browser] No active browser session available. E2B sandbox required for browser operations.",
         data={"selected": False},
     )
 
@@ -984,7 +1015,7 @@ def browser_console_exec(javascript: str) -> ToolResult:
             )
         except Exception as e:
             return ToolResult(success=False, message="JS execution failed: {}".format(e))
-    return ToolResult(success=True, message="JS execution not available in this mode.")
+    return ToolResult(success=False, message="[Browser] No active browser session available. E2B sandbox required for browser operations.")
 
 
 def browser_console_view(max_lines: int = 100) -> ToolResult:

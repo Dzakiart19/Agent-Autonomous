@@ -28,12 +28,28 @@ def _get_files_dir() -> str:
 DZECK_FILES_DIR = _get_files_dir()
 
 
+_MIME_MAP = {
+    ".txt": "text/plain", ".md": "text/markdown", ".csv": "text/csv",
+    ".json": "application/json", ".html": "text/html", ".xml": "application/xml",
+    ".js": "application/javascript", ".py": "text/x-python", ".sql": "text/x-sql",
+    ".yaml": "text/yaml", ".yml": "text/yaml", ".svg": "image/svg+xml",
+    ".zip": "application/zip", ".pdf": "application/pdf",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+    ".gif": "image/gif", ".webp": "image/webp",
+}
+
+
 def _make_download_url(file_path: str) -> str:
-    """Generate a download URL for a file accessible via /api/files/download."""
+    """Generate a download URL for a file with proper MIME type handling."""
     filename = os.path.basename(file_path)
+    ext = os.path.splitext(filename)[1].lower()
+    mime_type = _MIME_MAP.get(ext, "application/octet-stream")
     encoded_path = urllib.parse.quote(file_path, safe="")
     encoded_name = urllib.parse.quote(filename, safe="")
-    return f"/api/files/download?path={encoded_path}&name={encoded_name}"
+    return f"/api/files/download?path={encoded_path}&name={encoded_name}&type={urllib.parse.quote(mime_type, safe='')}"
 
 
 def _register_file_for_download(file_path: str) -> str:
@@ -108,12 +124,15 @@ def file_read(
                 pass
             if file_content is None:
                 local_fallback = os.path.join(DZECK_FILES_DIR, os.path.basename(file))
-                if os.path.isfile(local_fallback):
+                if os.path.isfile(local_fallback) and DZECK_FILES_DIR.startswith("/tmp/"):
                     with open(local_fallback, "r", encoding="utf-8", errors="replace") as f:
                         file_content = f.read()
-        elif os.path.isfile(file):
-            with open(file, "r", encoding="utf-8", errors="replace") as f:
-                file_content = f.read()
+        else:
+            return ToolResult(
+                success=False,
+                message=f"E2B sandbox is not available (E2B_API_KEY not set). File operations MUST run inside E2B sandbox. File: {file}",
+                data={"error": "e2b_not_available", "file": file},
+            )
 
         if file_content is None:
             return ToolResult(success=False, message=f"File not found: {file}", data={"error": "not_found", "file": file})
@@ -168,20 +187,26 @@ def file_write(
         is_sandbox_path = file.startswith("/home/user")
         is_output_path = "/output/" in file or file.startswith("/home/user/dzeck-ai/output")
 
+        if not _e2b_enabled:
+            return ToolResult(
+                success=False,
+                message=f"E2B sandbox is not available (E2B_API_KEY not set). File operations MUST run inside E2B sandbox. File: {file}",
+                data={"error": "e2b_not_available", "file": file},
+            )
+
         e2b_ok = False
         e2b_error = ""
-        if _e2b_enabled:
-            try:
-                from server.agent.tools.e2b_sandbox import write_file as e2b_write, _resolve_sandbox_path
-                sandbox_path = _resolve_sandbox_path(file)
-                e2b_ok = e2b_write(sandbox_path, write_content, append=append)
-                if not e2b_ok:
-                    e2b_error = f"E2B sandbox write failed for {sandbox_path} after retries."
-            except Exception as e:
-                e2b_ok = False
-                e2b_error = str(e)
+        try:
+            from server.agent.tools.e2b_sandbox import write_file as e2b_write, _resolve_sandbox_path
+            sandbox_path = _resolve_sandbox_path(file)
+            e2b_ok = e2b_write(sandbox_path, write_content, append=append)
+            if not e2b_ok:
+                e2b_error = f"E2B sandbox write failed for {sandbox_path} after retries."
+        except Exception as e:
+            e2b_ok = False
+            e2b_error = str(e)
 
-        if _e2b_enabled and not e2b_ok:
+        if not e2b_ok:
             return ToolResult(
                 success=False,
                 message=f"Failed to write file to E2B sandbox: {file}. {e2b_error}\nPlease retry or check E2B sandbox status.",
@@ -248,22 +273,25 @@ def file_str_replace(
         _e2b_enabled = bool(os.environ.get("E2B_API_KEY", ""))
         is_sandbox_path = file.startswith("/home/user")
 
+        if not _e2b_enabled:
+            return ToolResult(
+                success=False,
+                message=f"E2B sandbox is not available (E2B_API_KEY not set). File operations MUST run inside E2B sandbox. File: {file}",
+                data={"error": "e2b_not_available", "file": file},
+            )
+
         content = None
-        if _e2b_enabled:
-            try:
-                from server.agent.tools.e2b_sandbox import read_file as e2b_read, _resolve_sandbox_path
-                sandbox_path = _resolve_sandbox_path(file)
-                content = e2b_read(sandbox_path)
-            except Exception:
-                pass
-            if content is None:
-                local_fallback = os.path.join(DZECK_FILES_DIR, os.path.basename(file))
-                if os.path.isfile(local_fallback):
-                    with open(local_fallback, "r", encoding="utf-8", errors="replace") as f:
-                        content = f.read()
-        elif os.path.isfile(file):
-            with open(file, "r", encoding="utf-8", errors="replace") as f:
-                content = f.read()
+        try:
+            from server.agent.tools.e2b_sandbox import read_file as e2b_read, _resolve_sandbox_path
+            sandbox_path = _resolve_sandbox_path(file)
+            content = e2b_read(sandbox_path)
+        except Exception:
+            pass
+        if content is None:
+            local_fallback = os.path.join(DZECK_FILES_DIR, os.path.basename(file))
+            if os.path.isfile(local_fallback) and DZECK_FILES_DIR.startswith("/tmp/"):
+                with open(local_fallback, "r", encoding="utf-8", errors="replace") as f:
+                    content = f.read()
 
         if content is None:
             return ToolResult(success=False, message=f"File not found: {file}", data={"error": "not_found", "file": file})
@@ -278,36 +306,29 @@ def file_str_replace(
         count = content.count(old_str)
         new_content = content.replace(old_str, new_str)
 
-        if _e2b_enabled:
-            e2b_replace_ok = False
-            e2b_replace_err = ""
-            try:
-                from server.agent.tools.e2b_sandbox import write_file as e2b_write, _resolve_sandbox_path as _rsp
-                sandbox_path = _rsp(file)
-                e2b_replace_ok = e2b_write(sandbox_path, new_content)
-                if not e2b_replace_ok:
-                    e2b_replace_err = f"E2B sandbox write failed for {sandbox_path} after retries."
-            except Exception as e:
-                e2b_replace_err = str(e)
+        e2b_replace_ok = False
+        e2b_replace_err = ""
+        try:
+            from server.agent.tools.e2b_sandbox import write_file as e2b_write, _resolve_sandbox_path as _rsp
+            sandbox_path = _rsp(file)
+            e2b_replace_ok = e2b_write(sandbox_path, new_content)
             if not e2b_replace_ok:
-                return ToolResult(
-                    success=False,
-                    message=f"Failed to write replaced content to E2B sandbox: {file}. {e2b_replace_err}",
-                    data={"error": e2b_replace_err, "file": file, "e2b_write_failed": True},
-                )
+                e2b_replace_err = f"E2B sandbox write failed for {sandbox_path} after retries."
+        except Exception as e:
+            e2b_replace_err = str(e)
+        if not e2b_replace_ok:
+            return ToolResult(
+                success=False,
+                message=f"Failed to write replaced content to E2B sandbox: {file}. {e2b_replace_err}",
+                data={"error": e2b_replace_err, "file": file, "e2b_write_failed": True},
+            )
 
         is_output_path = "/output/" in file or file.startswith("/home/user/dzeck-ai/output")
         is_deliverable = is_output_path or file.startswith("/tmp/dzeck_files")
 
-        if _e2b_enabled:
-            local_path = os.path.join(DZECK_FILES_DIR, os.path.basename(file))
+        local_path = os.path.join(DZECK_FILES_DIR, os.path.basename(file))
+        if is_output_path:
             is_deliverable = True
-        elif is_deliverable:
-            local_path = os.path.join(DZECK_FILES_DIR, os.path.basename(file))
-        elif is_sandbox_path:
-            local_path = os.path.join(DZECK_FILES_DIR, os.path.basename(file))
-        else:
-            local_path = file
 
         parent_dir = os.path.dirname(local_path)
         if parent_dir and not os.path.exists(parent_dir):

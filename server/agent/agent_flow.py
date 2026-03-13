@@ -925,6 +925,15 @@ class DzeckAgent:
             step.result = fn_args.get("result", "Step completed")
             if not step.success:
                 step.status = ExecutionStatus.FAILED
+
+            if step.success and step.result:
+                _result_lower = step.result.lower()
+                _error_markers = ["traceback", "error:", "failed", "exception:", "syntaxerror", "indentationerror"]
+                if any(marker in _result_lower for marker in _error_markers):
+                    step.success = False
+                    step.status = ExecutionStatus.FAILED
+                    step.result += " [AUTO-REJECTED: Output contains unresolved error indicators]"
+
             status_enum = StepStatus.COMPLETED if step.success else StepStatus.FAILED
             yield make_event("step", status=status_enum.value, step=step.to_dict())
             yield {"type": "__step_done__"}
@@ -958,15 +967,11 @@ class DzeckAgent:
                     yield make_event("message_chunk", chunk=text[i:i + chunk_size], role="ask")
                     await asyncio.sleep(0.008)
                 yield make_event("message_end", role="ask")
-            # Mark this step as COMPLETED so that on continuation get_next_step()
-            # skips it and resumes from the NEXT pending step (not re-ask the question).
-            step.status = ExecutionStatus.COMPLETED
-            step.success = True
-            step.result = "Pertanyaan diajukan ke user: " + (text[:200] if text else "")
-            yield make_event("step", status=StepStatus.COMPLETED.value, step=step.to_dict())
+            step.status = ExecutionStatus.PENDING
+            step.success = False
+            step.result = "Menunggu jawaban user: " + (text[:200] if text else "")
+            yield make_event("step", status=StepStatus.PENDING.value, step=step.to_dict())
             yield make_event("waiting_for_user", text=text or "Menunggu balasan Anda...")
-            # NOTE: Do NOT yield "done" here — that would prematurely close the SSE stream.
-            # The final "done" is yielded by run_async after saving waiting state.
             yield {"type": "__step_done__"}
             return
 
@@ -1037,12 +1042,29 @@ class DzeckAgent:
 
             def _run_e2b_streaming():
                 from server.agent.tools.e2b_sandbox import get_sandbox
+                from server.agent.tools.shell import (
+                    _validate_python_syntax, _check_repeated_command_prerun,
+                    _check_repeated_error, _check_error_in_output,
+                )
                 sb = get_sandbox()
                 cmd = _args.get("command", "")
                 workdir = _args.get("exec_dir", "/home/user/dzeck-ai")
                 timeout_s = _args.get("timeout", 90)
                 if not sb:
                     return execute_tool(_res, _args)
+
+                from server.agent.models.tool_result import ToolResult
+
+                blocked = _check_repeated_command_prerun(cmd)
+                if blocked:
+                    e2b_q.put(None)
+                    return blocked
+
+                syntax_err = _validate_python_syntax(cmd, workdir)
+                if syntax_err:
+                    e2b_q.put(None)
+                    return syntax_err
+
                 try:
                     import shlex
                     sb.commands.run(f"mkdir -p {shlex.quote(workdir)}", timeout=10)
@@ -1052,22 +1074,30 @@ class DzeckAgent:
                         on_stderr=lambda data: e2b_q.put(("stderr", data if isinstance(data, str) else getattr(data, 'line', str(data)))),
                     )
                     e2b_q.put(None)
-                    from server.agent.models.tool_result import ToolResult
                     combined = ""
                     if result.stdout and result.stdout.strip():
                         combined += "stdout:\n{}".format(result.stdout)
                     if result.stderr and result.stderr.strip():
                         combined += "\nstderr:\n{}".format(result.stderr)
                     combined += "\nreturn_code: {}".format(result.exit_code)
+
+                    stdout_str = result.stdout or ""
+                    stderr_str = result.stderr or ""
+                    repeat_warn = _check_repeated_error(cmd, stderr_str)
+                    if repeat_warn:
+                        combined += repeat_warn
+                    has_error = _check_error_in_output(stdout_str, stderr_str)
+                    if has_error and result.exit_code == 0:
+                        combined += "\n⚠️ WARNING: Output contains error indicators despite exit_code=0. Verify output carefully."
+
                     return ToolResult(
                         success=(result.exit_code == 0),
                         message=combined,
-                        data={"stdout": result.stdout or "", "stderr": result.stderr or "",
+                        data={"stdout": stdout_str, "stderr": stderr_str,
                               "return_code": result.exit_code, "command": cmd, "backend": "E2B"},
                     )
                 except Exception as e:
                     e2b_q.put(None)
-                    from server.agent.models.tool_result import ToolResult
                     return ToolResult(
                         success=False,
                         message=f"E2B error: {e}",
@@ -1326,6 +1356,15 @@ ONLY respond with JSON. No explanations, no markdown, ONLY the JSON object.
                         step.result = parsed.get("result", "Step completed")
                         if not step.success:
                             step.status = ExecutionStatus.FAILED
+
+                        if step.success and step.result:
+                            _result_lower = step.result.lower()
+                            _error_markers = ["traceback", "error:", "failed", "exception:", "syntaxerror", "indentationerror"]
+                            if any(marker in _result_lower for marker in _error_markers):
+                                step.success = False
+                                step.status = ExecutionStatus.FAILED
+                                step.result += " [AUTO-REJECTED: Output contains unresolved error indicators]"
+
                         status_enum = StepStatus.COMPLETED if step.success else StepStatus.FAILED
                         yield make_event("step", status=status_enum.value, step=step.to_dict())
                         return
@@ -1470,9 +1509,28 @@ ONLY respond with JSON. No explanations, no markdown, ONLY the JSON object.
             step_results.append("- Step {} ({}): {} - {}".format(
                 s.id, s.description, status, s.result or "No result"))
 
+        output_files_info = "(tidak ada file output)"
+        try:
+            from server.agent.tools.e2b_sandbox import list_output_files as _list_output, ensure_zip_output
+            try:
+                ensure_zip_output()
+            except Exception:
+                pass
+            output_files = _list_output()
+            if output_files:
+                output_files_info = "\n".join(
+                    f"- {os.path.basename(f)} ({f})" for f in output_files
+                )
+                for f in output_files:
+                    from server.agent.tools.shell import _sync_e2b_output_file
+                    _sync_e2b_output_file(f)
+        except Exception:
+            pass
+
         prompt = SUMMARIZE_PROMPT.format(
             step_results="\n".join(step_results),
             message=user_message,
+            output_files=output_files_info,
         )
         summarize_system = (
             "Kamu adalah Dzeck, asisten AI yang membantu. "
@@ -1654,7 +1712,7 @@ ONLY respond with JSON. No explanations, no markdown, ONLY the JSON object.
                                 step_waiting = True
                             yield event
 
-                        if self.session_id and svc:
+                        if not step_waiting and self.session_id and svc:
                             await svc.save_step_completed(self.session_id, step.to_dict())
 
                         if step_waiting:
@@ -1820,7 +1878,7 @@ ONLY respond with JSON. No explanations, no markdown, ONLY the JSON object.
                         step_waiting = True
                     yield event
 
-                if self.session_id and svc:
+                if not step_waiting and self.session_id and svc:
                     await svc.save_step_completed(self.session_id, step.to_dict())
 
                 if step_waiting:

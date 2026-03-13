@@ -266,8 +266,163 @@ def _preflight_ensure_scripts(command: str, exec_dir: str = "/home/user/dzeck-ai
         return f"Pre-flight script check error for '{script_path}': {e}. Please ensure the file exists in E2B sandbox."
 
 
+def _auto_fix_python_syntax(script_path: str, error_msg: str, exec_dir: str) -> bool:
+    """Attempt to auto-fix common Python syntax errors. Returns True if fix was applied."""
+    import re as _re
+
+    try:
+        if E2B_ENABLED:
+            from server.agent.tools.e2b_sandbox import read_file as _e2b_read
+            content = _e2b_read(script_path)
+        else:
+            with open(script_path, "r", encoding="utf-8", errors="replace") as f:
+                content = f.read()
+        if not content:
+            return False
+    except Exception:
+        return False
+
+    original = content
+    lines = content.split("\n")
+
+    if "IndentationError" in error_msg or "unexpected indent" in error_msg:
+        fixed_lines = []
+        for line in lines:
+            if "\t" in line:
+                fixed_lines.append(line.replace("\t", "    "))
+            else:
+                fixed_lines.append(line)
+        content = "\n".join(fixed_lines)
+
+    if "SyntaxError" in error_msg and "expected an indented block" in error_msg:
+        match = _re.search(r"line (\d+)", error_msg)
+        if match:
+            line_no = int(match.group(1)) - 1
+            if 0 <= line_no < len(lines):
+                prev_line = lines[line_no - 1] if line_no > 0 else ""
+                if prev_line.rstrip().endswith(":"):
+                    indent = len(prev_line) - len(prev_line.lstrip()) + 4
+                    lines.insert(line_no, " " * indent + "pass")
+                    content = "\n".join(lines)
+
+    if content == original:
+        return False
+
+    try:
+        if E2B_ENABLED:
+            from server.agent.tools.e2b_sandbox import write_file as _e2b_write
+            return _e2b_write(script_path, content)
+        else:
+            with open(script_path, "w", encoding="utf-8") as f:
+                f.write(content)
+            return True
+    except Exception:
+        return False
+
+
+def _validate_python_syntax(command: str, exec_dir: str = "/home/user/dzeck-ai") -> Optional[ToolResult]:
+    """Pre-validate Python script syntax with up to 3 auto-fix attempts.
+    Returns ToolResult on failure after all attempts, None on success."""
+    import re as _re
+    match = _re.search(r'python[3]?\s+(?:-\w+\s+)*([^\s;|&]+\.py)', command)
+    if not match:
+        return None
+    script_path = match.group(1)
+    if not script_path.startswith("/"):
+        script_path = os.path.join(exec_dir, script_path)
+
+    max_attempts = 3
+    last_stderr = ""
+
+    for attempt in range(1, max_attempts + 1):
+        compile_cmd = f"python3 -m py_compile {script_path}"
+        if E2B_ENABLED:
+            res = _run_e2b(compile_cmd, exec_dir=exec_dir, timeout=30)
+        else:
+            res = _run_local(compile_cmd, exec_dir=exec_dir, timeout=30)
+
+        if res.get("success", False) or res.get("exit_code", -1) == 0:
+            if attempt > 1:
+                import logging
+                logging.getLogger(__name__).info(
+                    "[Shell] Python syntax fixed on attempt %d for %s", attempt, script_path)
+            return None
+
+        last_stderr = res.get("stderr", "")
+
+        if attempt < max_attempts:
+            fixed = _auto_fix_python_syntax(script_path, last_stderr, exec_dir)
+            if not fixed:
+                break
+
+    msg = (
+        f"[Shell] Python syntax validation FAILED for {script_path} "
+        f"(after {min(attempt, max_attempts)} attempt(s)).\n"
+        f"Error: {last_stderr}\n\n"
+        f"FIX REQUIRED: The script has syntax errors. You MUST:\n"
+        f"1. Read the error message above carefully\n"
+        f"2. Fix the script using file_write or file_str_replace\n"
+        f"3. Re-run the command after fixing\n"
+        f"Do NOT retry with the same broken script."
+    )
+    return ToolResult(
+        success=False,
+        message=msg,
+        data={"stdout": "", "stderr": last_stderr, "return_code": 1,
+              "command": command, "error": "syntax_validation_failed",
+              "script_path": script_path, "attempts": attempt},
+    )
+
+
+_recent_errors: Dict[str, int] = {}
+_recent_errors_lock = threading.Lock()
+
+
+def _check_repeated_error(command: str, error_output: str) -> Optional[str]:
+    """Track repeated errors. Returns warning message if same error seen 2+ times."""
+    if not error_output or not error_output.strip():
+        return None
+    error_key = f"{command}::{error_output[:200]}"
+    with _recent_errors_lock:
+        _recent_errors[error_key] = _recent_errors.get(error_key, 0) + 1
+        count = _recent_errors[error_key]
+    if count >= 2:
+        return (
+            f"\n⚠️ REPEATED ERROR DETECTED ({count} times): This exact error has occurred before. "
+            f"You MUST change your approach — do NOT retry with the same command. "
+            f"Analyze the error, try a different solution, or report to the user."
+        )
+    return None
+
+
+def _check_repeated_command_prerun(command: str) -> Optional[ToolResult]:
+    """Block execution of a command that has failed with the same error 3+ times."""
+    with _recent_errors_lock:
+        for key, count in _recent_errors.items():
+            if key.startswith(f"{command}::") and count >= 3:
+                msg = (
+                    f"[Shell] BLOCKED: This command has failed {count} times with the same error. "
+                    f"You MUST use a different approach. Do NOT retry the identical command.\n"
+                    f"Previous error pattern: {key.split('::', 1)[1][:300]}"
+                )
+                return ToolResult(
+                    success=False,
+                    message=msg,
+                    data={"stdout": "", "stderr": msg, "return_code": 1,
+                          "command": command, "error": "repeated_failure_blocked"},
+                )
+    return None
+
+
+def _check_error_in_output(stdout: str, stderr: str) -> bool:
+    """Check if output contains error indicators."""
+    combined = (stdout + stderr).lower()
+    error_indicators = ["traceback", "error:", "failed", "exception:", "syntaxerror", "indentationerror"]
+    return any(indicator in combined for indicator in error_indicators)
+
+
 def shell_exec(command: str, exec_dir: str = "/home/user/dzeck-ai", id: str = "default") -> ToolResult:
-    """Execute a shell command. Uses E2B cloud sandbox when available, else local."""
+    """Execute a shell command. Uses E2B cloud sandbox when available, refuses local execution."""
 
     gui_detected = _is_gui_command(command)
     if gui_detected:
@@ -286,18 +441,37 @@ def shell_exec(command: str, exec_dir: str = "/home/user/dzeck-ai", id: str = "d
                   "id": id, "error": "gui_not_available"},
         )
 
-    if E2B_ENABLED:
-        preflight_err = _preflight_ensure_scripts(command, exec_dir=exec_dir)
-        if preflight_err:
-            return ToolResult(
-                success=False,
-                message=preflight_err,
-                data={"stdout": "", "stderr": preflight_err, "return_code": 1,
-                      "command": command, "id": id, "error": "script_not_found"},
-            )
-        res = _run_e2b(command, exec_dir=exec_dir)
-    else:
-        res = _run_local(command, exec_dir=exec_dir)
+    blocked = _check_repeated_command_prerun(command)
+    if blocked:
+        return blocked
+
+    if not E2B_ENABLED:
+        msg = (
+            "[Shell] E2B sandbox is not available (E2B_API_KEY not set). "
+            "All shell execution MUST run inside E2B sandbox for security. "
+            "Local execution is disabled. Please configure E2B_API_KEY."
+        )
+        return ToolResult(
+            success=False,
+            message=msg,
+            data={"stdout": "", "stderr": msg, "return_code": 1, "command": command,
+                  "id": id, "error": "e2b_not_available"},
+        )
+
+    preflight_err = _preflight_ensure_scripts(command, exec_dir=exec_dir)
+    if preflight_err:
+        return ToolResult(
+            success=False,
+            message=preflight_err,
+            data={"stdout": "", "stderr": preflight_err, "return_code": 1,
+                  "command": command, "id": id, "error": "script_not_found"},
+        )
+
+    syntax_err = _validate_python_syntax(command, exec_dir=exec_dir)
+    if syntax_err is not None:
+        return syntax_err
+
+    res = _run_e2b(command, exec_dir=exec_dir)
 
     stdout = res.get("stdout", "")
     stderr = res.get("stderr", "")
@@ -316,17 +490,36 @@ def shell_exec(command: str, exec_dir: str = "/home/user/dzeck-ai", id: str = "d
         combined += "\nstderr:\n{}".format(stderr)
     combined += "\nreturn_code: {}".format(exit_code)
 
+    if _check_error_in_output(stdout, stderr):
+        repeated_warning = _check_repeated_error(command, stderr or stdout)
+        if repeated_warning:
+            combined += repeated_warning
+
+    if not res.get("success", False) and _check_error_in_output(stdout, stderr):
+        combined += (
+            "\n\n⚠️ OUTPUT CONTAINS ERRORS: Do NOT mark this step as completed. "
+            "Analyze the error, fix the issue, and verify before proceeding."
+        )
+
     sess = _get_or_create_session(id)
     sess["output"] = combined
     sess["return_code"] = exit_code
     sess["command"] = command
 
-    backend = "E2B" if E2B_ENABLED else "local"
+    backend = "E2B"
 
-    # Auto-sync output files from E2B to local server for download
     synced_files = []
     if E2B_ENABLED and res.get("success", False):
         output_paths = _extract_output_paths_from_command(command)
+        try:
+            from server.agent.tools.e2b_sandbox import list_output_files as _list_out
+            sandbox_output_files = _list_out()
+            for sf in sandbox_output_files:
+                if sf not in output_paths:
+                    output_paths.append(sf)
+        except Exception:
+            pass
+
         for path in output_paths:
             dl_url = _sync_e2b_output_file(path)
             if dl_url:
@@ -402,12 +595,15 @@ def shell_write_to_process(id: str, input: str, press_enter: bool = True) -> Too
         )
     last_command = session.get("command", "")
     if last_command:
+        if not E2B_ENABLED:
+            return ToolResult(
+                success=False,
+                message="[Shell] E2B sandbox is not available. All shell operations require E2B sandbox.",
+                data={"id": id, "error": "e2b_not_available"},
+            )
         stdin_data = (input + "\n") if press_enter else input
         combined_cmd = "echo '{}' | {}".format(stdin_data.strip(), last_command)
-        if E2B_ENABLED:
-            res = _run_e2b(combined_cmd)
-        else:
-            res = _run_local(combined_cmd)
+        res = _run_e2b(combined_cmd)
         out = (res.get("stdout") or "") + (res.get("stderr") or "")
         session["output"] = out
         return ToolResult(

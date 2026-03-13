@@ -73,6 +73,26 @@ PACKAGE MANAGEMENT:
 - pip: gunakan flag --break-system-packages jika diperlukan
 - npm: bekerja normal
 - apt-get: gunakan flag -y
+
+ANTI-HALUSINASI (WAJIB DIPATUHI):
+1. Setiap step yang mengeksekusi kode HARUS diikuti step verifikasi hasilnya
+   - Contoh: setelah "Jalankan script Python", harus ada "Verifikasi output script berhasil"
+2. Plan TIDAK BOLEH mengandung asumsi bahwa library tersedia — SELALU sertakan step install terlebih dulu
+   - BENAR: Step 1: "Install library requests dan beautifulsoup4", Step 2: "Jalankan script scraping"
+   - SALAH: Langsung "Jalankan script scraping" tanpa install dependency
+3. Jumlah step MAKSIMAL 8 dan TIDAK BOLEH redundan
+   - Jangan buat 2 step yang melakukan hal yang sama
+   - Gabungkan step-step kecil yang terkait
+4. Step HARUS spesifik dan atomic (satu tindakan per step), BUKAN abstrak
+   - BENAR: "Install library pandas dan openpyxl menggunakan pip"
+   - SALAH: "Siapkan environment"
+5. Setiap step HARUS memiliki tujuan yang jelas dan terukur
+   - BENAR: "Buat file laporan.md di /home/user/dzeck-ai/output/ berisi hasil analisis"
+   - SALAH: "Selesaikan tugas"
+
+ATURAN RETRY & ERROR:
+- Jika step gagal, plan harus mendukung pendekatan alternatif
+- JANGAN buat step yang identik berulang — setiap retry harus berbeda pendekatannya
 """
 
 CREATE_PLAN_PROMPT = """Analyze the following user request and create an execution plan.

@@ -450,7 +450,7 @@ def list_workspace_files() -> list:
 
 
 def list_output_files() -> list:
-    """List files in the E2B output directory (deliverables only)."""
+    """List files in the E2B output directory (deliverables only). Returns absolute paths."""
     sb = get_sandbox()
     if sb is None:
         return []
@@ -460,10 +460,87 @@ def list_output_files() -> list:
             timeout=15
         )
         if result.stdout:
-            return [f.strip() for f in result.stdout.strip().split("\n") if f.strip()]
+            files = [f.strip() for f in result.stdout.strip().split("\n") if f.strip()]
+            return [f if f.startswith("/") else os.path.join(OUTPUT_DIR, f) for f in files]
         return []
     except Exception:
         return []
+
+
+def list_output_files_with_info() -> list:
+    """List output files with size and extension info for download URL generation."""
+    sb = get_sandbox()
+    if sb is None:
+        return []
+    try:
+        result = sb.commands.run(
+            f"find {OUTPUT_DIR} /tmp/dzeck_output -type f -maxdepth 4 "
+            f"-exec stat -c '%n|%s' {{}} \\; 2>/dev/null | head -100",
+            timeout=15
+        )
+        files_info = []
+        if result.stdout:
+            for line in result.stdout.strip().split("\n"):
+                line = line.strip()
+                if not line or "|" not in line:
+                    continue
+                parts = line.split("|", 1)
+                filepath = parts[0]
+                size = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+                if not filepath.startswith("/"):
+                    filepath = os.path.join(OUTPUT_DIR, filepath)
+                ext = os.path.splitext(filepath)[1].lower()
+                files_info.append({
+                    "path": filepath,
+                    "filename": os.path.basename(filepath),
+                    "size": size,
+                    "extension": ext,
+                })
+        return files_info
+    except Exception:
+        return []
+
+
+def ensure_zip_output(zip_filename: str = "output.zip") -> Optional[str]:
+    """If output dir has multiple files but no .zip, auto-create a zip archive.
+    Only creates zip when there are 2+ output files (single files don't need archiving).
+    Returns the zip file path if created/found, None otherwise."""
+    sb = get_sandbox()
+    if sb is None:
+        return None
+    try:
+        check = sb.commands.run(
+            f"find {OUTPUT_DIR} -maxdepth 1 -name '*.zip' -type f 2>/dev/null | head -1",
+            timeout=10
+        )
+        if check.stdout and check.stdout.strip():
+            return check.stdout.strip()
+
+        file_count = sb.commands.run(
+            f"find {OUTPUT_DIR} -type f 2>/dev/null | wc -l",
+            timeout=10
+        )
+        count = 0
+        if file_count.stdout:
+            try:
+                count = int(file_count.stdout.strip())
+            except ValueError:
+                pass
+        if count < 2:
+            return None
+
+        zip_path = os.path.join(OUTPUT_DIR, zip_filename)
+        result = sb.commands.run(
+            f'cd {OUTPUT_DIR} && zip -r "{zip_path}" . -x "*.zip" 2>/dev/null',
+            timeout=60
+        )
+        if result.exit_code == 0:
+            logger.info("[E2B] Auto-created zip archive: %s", zip_path)
+            return zip_path
+        return None
+    except Exception as e:
+        logger.warning("[E2B] ensure_zip_output failed: %s", e)
+        return None
 
 
 def install_packages(packages: list) -> bool:

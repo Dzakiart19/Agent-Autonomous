@@ -19,6 +19,15 @@ Dzeck AI is a cross-platform application built with Expo (React Native) and Node
 - Do not make changes to the `app/` folder without explicit instruction.
 - All prompts should be in Bahasa Indonesia by default.
 
+## Recent Updates (March 2026 — Session 4: Production Overhaul)
+- **Fix Plan Auto-Complete Bug:** `agent_flow.py` — `message_ask_user` no longer marks steps as COMPLETED. Steps stay PENDING while waiting for user reply. `save_step_completed` is skipped when `step_waiting=True` in both continuation and main flow paths.
+- **Code Validation & Self-Correction Loop:** `shell.py` — Added `_validate_python_syntax()` which runs `python3 -m py_compile` before executing Python scripts. Up to 3 retry attempts with syntax analysis between each.
+- **Execution Prompt Hardened:** `execution.py` — Added `<code_generation_rules>` (try blocks must have valid body, mandatory syntax validation, pip install before import, output to /output/, consistent indentation, proper error handling) and `<anti_hallucination_rules>` (verify shell output, no completed-on-error, change approach on repeated errors).
+- **Planner Prompt Anti-Hallucination:** `planner.py` — Added rules: every code step needs verification step, no library assumption, max 8 steps, atomic/specific steps, retry must differ.
+- **File Delivery Enhancement:** `execution.py` SUMMARIZE_PROMPT now includes `{output_files}` template. `agent_flow.py` `summarize_async` scans E2B output dir and syncs files before summary, announces downloadable files.
+- **E2B-Only Execution Enforced:** `shell.py` — Local execution disabled; returns error if E2B_API_KEY not set. `file.py` — `file_read`, `file_write`, `file_str_replace` all refuse to operate without E2B sandbox.
+- **Anti-Hallucination & Retry Intelligence:** `shell.py` — Added `_check_repeated_error()` (tracks command+error pairs, warns on 2+ repeats), `_check_error_in_output()` (detects traceback/error/failed in output). Error outputs include warnings to change approach.
+
 ## Recent Updates (March 2026 — Session 3: System Prompt Upgrade)
 - **System Prompt Upgrade (Claude Cowork Integration):** `server/agent/prompts/system.py` diperbarui dengan seksi-seksi perilaku komprehensif: refusal_handling, tone_and_formatting, user_wellbeing, evenhandedness, knowledge_cutoff, additional_info, ask_user_question_guidelines, todo_rules (with tools), task_tool_guidelines, citation_requirements, artifacts_rules, skills_and_best_practices, file_creation_advice, producing_outputs, sharing_files, web_content_restrictions, unnecessary_tool_use_avoidance, suggesting_actions, package_management. Semua referensi "Claude" diganti "Dzeck", "Anthropic" diganti "Tim Dzeck".
 - **New Tools — TodoList:** `server/agent/tools/todo.py` — Tools baru: `todo_write` (buat checklist), `todo_update` (tandai item selesai), `todo_read` (baca kemajuan). Menggunakan file todo.md di workspace.
