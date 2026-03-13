@@ -25,6 +25,16 @@ _MAX_CREATE_ATTEMPTS = 3
 WORKSPACE_DIR = "/home/user/dzeck-ai"
 OUTPUT_DIR = "/home/user/dzeck-ai/output"
 
+def get_session_workspace() -> str:
+    """Return per-session workspace dir: /home/user/dzeck-ai/<session_id>/
+    Falls back to WORKSPACE_DIR if no session is set."""
+    session_id = os.environ.get("DZECK_SESSION_ID", "")
+    if session_id:
+        safe_id = "".join(c for c in session_id if c.isalnum() or c in "-_")[:32]
+        return os.path.join(WORKSPACE_DIR, safe_id)
+    return WORKSPACE_DIR
+
+
 _file_cache_lock = threading.Lock()
 _file_cache: Dict[str, str] = {}
 
@@ -111,9 +121,10 @@ def _create_sandbox() -> Optional[Any]:
             sb = Sandbox.create(api_key=E2B_API_KEY, timeout=900)
             logger.info("[E2B] Sandbox ready (id=%s). Setting up workspace...", sb.sandbox_id)
 
+            session_ws = get_session_workspace()
             sb.commands.run(
-                f"mkdir -p {WORKSPACE_DIR} {OUTPUT_DIR} /tmp/dzeck_output && "
-                f"cd {WORKSPACE_DIR} && echo 'workspace ready'",
+                f"mkdir -p {WORKSPACE_DIR} {OUTPUT_DIR} {session_ws} /tmp/dzeck_output && "
+                f"cd {session_ws} && echo 'workspace ready'",
                 timeout=15
             )
 

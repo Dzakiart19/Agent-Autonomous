@@ -54,11 +54,12 @@ def _shell_quote(s: str) -> str:
     return shlex.quote(s)
 
 
-def _run_e2b(command: str, exec_dir: str = "/home/user/dzeck-ai", timeout: int = 90) -> Dict[str, Any]:
+def _run_e2b(command: str, exec_dir: str = "", timeout: int = 90) -> Dict[str, Any]:
     """Execute command via E2B cloud sandbox. Auto-ensures workspace dir exists."""
     try:
-        from server.agent.tools.e2b_sandbox import run_command
-        return run_command(command, workdir=exec_dir, timeout=timeout)
+        from server.agent.tools.e2b_sandbox import run_command, get_session_workspace
+        effective_dir = exec_dir if exec_dir else get_session_workspace()
+        return run_command(command, workdir=effective_dir, timeout=timeout)
     except Exception as e:
         return {"success": False, "stdout": "", "stderr": str(e), "exit_code": -1}
 
@@ -235,7 +236,7 @@ def _extract_output_paths_from_command(command: str) -> list:
     return unique
 
 
-def _preflight_ensure_scripts(command: str, exec_dir: str = "/home/user/dzeck-ai") -> Optional[str]:
+def _preflight_ensure_scripts(command: str, exec_dir: str = "") -> Optional[str]:
     """Before executing a python script command in E2B, ensure the script file exists in the sandbox.
     Returns an error message string if the file cannot be ensured, or None on success."""
     if not E2B_ENABLED:
@@ -246,10 +247,11 @@ def _preflight_ensure_scripts(command: str, exec_dir: str = "/home/user/dzeck-ai
         return None
     script_path = match.group(1)
     try:
-        from server.agent.tools.e2b_sandbox import ensure_file_in_sandbox, WORKSPACE_DIR, get_cached_file_path
+        from server.agent.tools.e2b_sandbox import ensure_file_in_sandbox, WORKSPACE_DIR, get_cached_file_path, get_session_workspace
         import os as _os
+        effective_dir = exec_dir if exec_dir else get_session_workspace()
         if not script_path.startswith("/"):
-            resolved_exec = _os.path.normpath(_os.path.join(exec_dir or WORKSPACE_DIR, script_path))
+            resolved_exec = _os.path.normpath(_os.path.join(effective_dir or WORKSPACE_DIR, script_path))
             resolved_ws = _os.path.normpath(_os.path.join(WORKSPACE_DIR, script_path))
             cached_exec = get_cached_file_path(resolved_exec)
             cached_ws = get_cached_file_path(resolved_ws) if resolved_ws != resolved_exec else None
@@ -383,11 +385,18 @@ _recent_errors: Dict[str, int] = {}
 _recent_errors_lock = threading.Lock()
 
 
+def _session_error_prefix() -> str:
+    """Return a session-scoped prefix for error tracking keys."""
+    session_id = os.environ.get("DZECK_SESSION_ID", "")
+    return f"{session_id}::" if session_id else ""
+
+
 def _check_repeated_error(command: str, error_output: str) -> Optional[str]:
-    """Track repeated errors. Returns warning message if same error seen 2+ times."""
+    """Track repeated errors (session-scoped). Returns warning message if same error seen 2+ times."""
     if not error_output or not error_output.strip():
         return None
-    error_key = f"{command}::{error_output[:200]}"
+    prefix = _session_error_prefix()
+    error_key = f"{prefix}{command}::{error_output[:200]}"
     with _recent_errors_lock:
         _recent_errors[error_key] = _recent_errors.get(error_key, 0) + 1
         count = _recent_errors[error_key]
@@ -401,14 +410,16 @@ def _check_repeated_error(command: str, error_output: str) -> Optional[str]:
 
 
 def _check_repeated_command_prerun(command: str) -> Optional[ToolResult]:
-    """Block execution of a command that has failed with the same error 3+ times."""
+    """Block execution of a command that has failed with the same error 2+ times (session-scoped)."""
+    prefix = _session_error_prefix()
     with _recent_errors_lock:
         for key, count in _recent_errors.items():
-            if key.startswith(f"{command}::") and count >= 3:
+            if key.startswith(f"{prefix}{command}::") and count >= 2:
                 msg = (
-                    f"[Shell] BLOCKED: This command has failed {count} times with the same error. "
-                    f"You MUST use a different approach. Do NOT retry the identical command.\n"
-                    f"Previous error pattern: {key.split('::', 1)[1][:300]}"
+                    f"[Shell] BLOCKED: identical command/error seen before — change approach entirely. "
+                    f"This command has failed {count} times with the same error. "
+                    f"You MUST use a completely different approach. Do NOT retry.\n"
+                    f"Previous error pattern: {key.split('::', 1)[-1][:300]}"
                 )
                 return ToolResult(
                     success=False,
@@ -426,8 +437,14 @@ def _check_error_in_output(stdout: str, stderr: str) -> bool:
     return any(indicator in combined for indicator in error_indicators)
 
 
-def shell_exec(command: str, exec_dir: str = "/home/user/dzeck-ai", id: str = "default") -> ToolResult:
+def shell_exec(command: str, exec_dir: str = "", id: str = "default") -> ToolResult:
     """Execute a shell command. Uses E2B cloud sandbox when available, refuses local execution."""
+    if not exec_dir:
+        try:
+            from server.agent.tools.e2b_sandbox import get_session_workspace
+            exec_dir = get_session_workspace()
+        except Exception:
+            exec_dir = "/home/user/dzeck-ai"
 
     gui_detected = _is_gui_command(command)
     if gui_detected:

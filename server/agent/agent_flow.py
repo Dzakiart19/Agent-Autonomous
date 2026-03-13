@@ -519,6 +519,40 @@ def _coerce_bool(value: Any, default: bool = True) -> bool:
     return bool(value)
 
 
+def _compact_exec_messages(messages: list) -> list:
+    """Compact exec_messages when they exceed 12 messages to prevent token overflow.
+    Keeps: [0] system prompt, [1] initial user prompt, last 4 messages, + compressed middle summary.
+    """
+    if len(messages) <= 12:
+        return messages
+    system_msg = messages[0]
+    first_user_msg = messages[1] if len(messages) > 1 else None
+    last_4 = messages[-4:]
+    middle = messages[2:-4] if len(messages) > 6 else []
+    if not middle:
+        return messages
+    # Build a compressed summary of the middle messages
+    summary_lines = []
+    for msg in middle:
+        role = msg.get("role", "")
+        content = str(msg.get("content", ""))[:300]
+        summary_lines.append(f"[{role}]: {content}")
+    compressed = {
+        "role": "user",
+        "content": (
+            "[CONTEXT SUMMARY - previous tool calls compressed to save tokens]\n"
+            + "\n".join(summary_lines)
+            + "\n[END SUMMARY - continue from here]"
+        ),
+    }
+    result = [system_msg]
+    if first_user_msg:
+        result.append(first_user_msg)
+    result.append(compressed)
+    result.extend(last_4)
+    return result
+
+
 def safe_plan_dict(plan: Plan) -> Dict[str, Any]:
     d = plan.to_dict()
     d.pop("goal", None)
@@ -1345,6 +1379,9 @@ ONLY respond with JSON. No explanations, no markdown, ONLY the JSON object.
                         return
                     if iteration > 0 and iteration % 5 == 0:
                         self.memory.compact()
+                    # Compact exec_messages if context is getting too long (>12 messages)
+                    if len(exec_messages) > 12:
+                        exec_messages = _compact_exec_messages(exec_messages)
                     continue
 
                 if text:
@@ -1410,6 +1447,9 @@ ONLY respond with JSON. No explanations, no markdown, ONLY the JSON object.
                         })
                         if iteration > 0 and iteration % 5 == 0:
                             self.memory.compact()
+                        # Compact exec_messages if context is getting too long (>12 messages)
+                        if len(exec_messages) > 12:
+                            exec_messages = _compact_exec_messages(exec_messages)
                         continue
 
                 if text:
@@ -1867,6 +1907,7 @@ ONLY respond with JSON. No explanations, no markdown, ONLY the JSON object.
             yield make_event("plan", status=PlanStatus.RUNNING.value, plan=safe_plan_dict(self.plan))
 
             step_waiting = False
+            _step_consecutive_failures: Dict[str, int] = {}
             while True:
                 step = self.plan.get_next_step()
                 if not step:
@@ -1877,6 +1918,30 @@ ONLY respond with JSON. No explanations, no markdown, ONLY the JSON object.
                     if event.get("type") == "waiting_for_user":
                         step_waiting = True
                     yield event
+
+                # Step retry: if step failed, retry once with error context injected
+                if not step_waiting and step.status == ExecutionStatus.FAILED:
+                    fail_count = _step_consecutive_failures.get(step.id, 0) + 1
+                    _step_consecutive_failures[step.id] = fail_count
+                    if fail_count < 2:
+                        error_ctx = step.result or step.error or "Unknown failure"
+                        retry_msg = (
+                            f"{user_message}\n\n"
+                            f"[RETRY] Previous attempt for this step FAILED with: {error_ctx}. "
+                            f"Take a DIFFERENT approach. Do NOT repeat the same command or strategy."
+                        )
+                        step.status = ExecutionStatus.PENDING
+                        step.result = None
+                        step.error = None
+                        yield make_event("step", status="retrying", step=step.to_dict())
+                        async for event in self.execute_step_async(self.plan, step, retry_msg):
+                            if event.get("type") == "waiting_for_user":
+                                step_waiting = True
+                            yield event
+                    else:
+                        _step_consecutive_failures.pop(step.id, None)
+                else:
+                    _step_consecutive_failures.pop(step.id, None)
 
                 if not step_waiting and self.session_id and svc:
                     await svc.save_step_completed(self.session_id, step.to_dict())

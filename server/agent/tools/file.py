@@ -363,7 +363,42 @@ def file_find_in_content(
     pattern: str = "",
     **kwargs,
 ) -> ToolResult:
-    """Search for pattern in files matching glob under path."""
+    """Search for pattern in files matching glob under path. Uses E2B sandbox when available."""
+    _e2b_enabled = bool(os.environ.get("E2B_API_KEY", ""))
+
+    # E2B path: use grep inside sandbox
+    if _e2b_enabled and (path.startswith("/home/user") or path.startswith("/tmp")):
+        try:
+            from server.agent.tools.e2b_sandbox import run_command as e2b_run
+            import shlex as _shlex
+            glob_pattern = glob.replace("**", "*").replace("*/*", "*")
+            if pattern:
+                grep_pattern = _shlex.quote(pattern)
+                if glob_pattern and glob_pattern != "**/*" and glob_pattern != "*":
+                    cmd = f"grep -r --include={_shlex.quote(glob_pattern)} -n {grep_pattern} {_shlex.quote(path)} 2>/dev/null | head -100"
+                else:
+                    cmd = f"grep -r -n {grep_pattern} {_shlex.quote(path)} 2>/dev/null | head -100"
+            else:
+                if glob_pattern and glob_pattern != "**/*" and glob_pattern != "*":
+                    cmd = f"find {_shlex.quote(path)} -name {_shlex.quote(glob_pattern)} -type f 2>/dev/null | head -100"
+                else:
+                    cmd = f"find {_shlex.quote(path)} -type f 2>/dev/null | head -100"
+            result = e2b_run(cmd, workdir=path, timeout=20)
+            stdout = result.get("stdout", "").strip()
+            matches = [l.strip() for l in stdout.split("\n") if l.strip()] if stdout else []
+            matches_text = "\n".join(matches[:50])
+            if pattern:
+                msg = "Found {} match(es) for '{}' in {} (E2B sandbox):\n{}".format(len(matches), pattern, path, matches_text)
+            else:
+                msg = "Found {} file(s) in {} (E2B sandbox):\n{}".format(len(matches), path, matches_text)
+            return ToolResult(
+                success=True,
+                message=msg,
+                data={"path": path, "glob": glob, "pattern": pattern, "matches": matches[:50], "count": len(matches)},
+            )
+        except Exception as e:
+            return ToolResult(success=False, message=f"E2B content search failed: {str(e)}", data={"error": str(e), "path": path})
+
     try:
         if not os.path.isdir(path):
             return ToolResult(success=False, message=f"Directory not found: {path}", data={"error": "not_found", "path": path})
@@ -421,7 +456,40 @@ def file_find_by_name(
     glob: str = "*",
     **kwargs,
 ) -> ToolResult:
-    """Find files matching a glob pattern in a directory."""
+    """Find files matching a glob pattern in a directory. Uses E2B sandbox when available."""
+    _e2b_enabled = bool(os.environ.get("E2B_API_KEY", ""))
+
+    # E2B path: run find command inside sandbox
+    if _e2b_enabled and (path.startswith("/home/user") or path.startswith("/tmp")):
+        try:
+            from server.agent.tools.e2b_sandbox import run_command as e2b_run
+            import shlex as _shlex
+            # Convert glob to find-compatible pattern
+            glob_pattern = glob.replace("**", "*")
+            if glob_pattern and glob_pattern != "*":
+                find_cmd = f"find {_shlex.quote(path)} -name {_shlex.quote(glob_pattern)} -type f 2>/dev/null | head -100"
+            else:
+                find_cmd = f"find {_shlex.quote(path)} -type f 2>/dev/null | head -100"
+            result = e2b_run(find_cmd, workdir=path, timeout=20)
+            stdout = result.get("stdout", "").strip()
+            if result.get("exit_code", -1) == -1 and not stdout:
+                return ToolResult(
+                    success=False,
+                    message=f"Directory not found in E2B sandbox: {path}",
+                    data={"error": "not_found", "path": path},
+                )
+            files = [f.strip() for f in stdout.split("\n") if f.strip()] if stdout else []
+            file_list = "\n".join(files)
+            msg = f"Found {len(files)} file(s) matching '{glob}' in {path} (E2B sandbox):\n{file_list}"
+            return ToolResult(
+                success=True,
+                message=msg,
+                data={"path": path, "pattern": glob, "files": files, "count": len(files), "truncated": len(files) >= 100},
+            )
+        except Exception as e:
+            return ToolResult(success=False, message=f"E2B file search failed: {str(e)}", data={"error": str(e), "path": path})
+
+    # Local fallback
     try:
         if not os.path.isdir(path):
             return ToolResult(success=False, message=f"Directory not found: {path}", data={"error": "not_found", "path": path})
