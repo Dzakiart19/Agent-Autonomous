@@ -7,6 +7,7 @@ Provides: ShellTool class + backward-compatible functions.
 """
 import os
 import queue
+import shlex
 import subprocess
 import time
 import threading
@@ -47,6 +48,10 @@ def _get_or_create_session(sid: str) -> Dict[str, Any]:
 def _get_session(sid: str) -> Optional[Dict[str, Any]]:
     with _sessions_lock:
         return _shell_sessions.get(sid)
+
+
+def _shell_quote(s: str) -> str:
+    return shlex.quote(s)
 
 
 def _run_e2b(command: str, exec_dir: str = "/home/user/dzeck-ai", timeout: int = 90) -> Dict[str, Any]:
@@ -553,20 +558,30 @@ def shell_exec(command: str, exec_dir: str = "/home/user/dzeck-ai", id: str = "d
 def shell_view(id: str = "default") -> ToolResult:
     """View the current output/status of a shell session."""
     session = _get_session(id)
+    fallback_warning = ""
     if not session:
-        available = []
         with _sessions_lock:
             available = list(_shell_sessions.keys())
-        return ToolResult(
-            success=True,
-            message="Shell session '{}' tidak ditemukan (sudah selesai atau belum dimulai). Session aktif: {}".format(
-                id, available or ["(tidak ada)"]),
-            data={"id": id, "found": False, "available_sessions": available},
-        )
+            if len(available) == 1:
+                fallback_id = available[0]
+                session = _shell_sessions[fallback_id]
+                fallback_warning = "[Peringatan] Session '{}' tidak ditemukan, menampilkan session '{}' yang tersedia. ".format(id, fallback_id)
+                id = fallback_id
+        if not session:
+            hint = (
+                "Session yang tersedia: {}. Gunakan id yang sesuai.".format(available)
+                if available
+                else "Tidak ada session aktif. Buat session baru dengan shell_exec terlebih dahulu (contoh: shell_exec id=\"main\" command=\"...\")."
+            )
+            return ToolResult(
+                success=False,
+                message="Session '{}' tidak ditemukan. {}".format(id, hint),
+                data={"id": id, "found": False, "available_sessions": available},
+            )
     output = session.get("output", "(belum ada output)")
     return ToolResult(
         success=True,
-        message="Session '{}' (perintah: {})\n\n{}".format(id, session.get("command", ""), output),
+        message="{}Session '{}' (perintah: {})\n\n{}".format(fallback_warning, id, session.get("command", ""), output),
         data={
             "id": id,
             "command": session.get("command", ""),
@@ -580,19 +595,33 @@ def shell_view(id: str = "default") -> ToolResult:
 def shell_wait(id: str = "default", seconds: int = 5) -> ToolResult:
     """Wait N seconds then show session status. Always returns success=True."""
     seconds = max(1, min(int(seconds) if seconds else 5, 120))
-    time.sleep(min(seconds, 3))
+    time.sleep(seconds)
     return shell_view(id)
 
 
 def shell_write_to_process(id: str, input: str, press_enter: bool = True) -> ToolResult:
     """Send input to an existing session by re-running with piped input."""
     session = _get_session(id)
+    fallback_warning = ""
     if not session:
-        return ToolResult(
-            success=True,
-            message="Session '{}' tidak ditemukan.".format(id),
-            data={"id": id, "found": False, "input": input},
-        )
+        with _sessions_lock:
+            available = list(_shell_sessions.keys())
+            if len(available) == 1:
+                fallback_id = available[0]
+                session = _shell_sessions[fallback_id]
+                fallback_warning = "[Peringatan] Session '{}' tidak ditemukan, menggunakan session '{}' yang tersedia. ".format(id, fallback_id)
+                id = fallback_id
+        if not session:
+            hint = (
+                "Session yang tersedia: {}. Gunakan id yang sesuai.".format(available)
+                if available
+                else "Tidak ada session aktif. Buat session baru dengan shell_exec terlebih dahulu (contoh: shell_exec id=\"main\" command=\"...\")."
+            )
+            return ToolResult(
+                success=False,
+                message="Session '{}' tidak ditemukan. {}".format(id, hint),
+                data={"id": id, "found": False, "input": input, "available_sessions": available},
+            )
     last_command = session.get("command", "")
     if last_command:
         if not E2B_ENABLED:
@@ -601,19 +630,25 @@ def shell_write_to_process(id: str, input: str, press_enter: bool = True) -> Too
                 message="[Shell] E2B sandbox is not available. All shell operations require E2B sandbox.",
                 data={"id": id, "error": "e2b_not_available"},
             )
-        stdin_data = (input + "\n") if press_enter else input
-        combined_cmd = "echo '{}' | {}".format(stdin_data.strip(), last_command)
+        if press_enter:
+            combined_cmd = "printf '%s\\n' {} | {}".format(
+                _shell_quote(input), last_command
+            )
+        else:
+            combined_cmd = "printf '%s' {} | {}".format(
+                _shell_quote(input), last_command
+            )
         res = _run_e2b(combined_cmd)
         out = (res.get("stdout") or "") + (res.get("stderr") or "")
         session["output"] = out
         return ToolResult(
             success=res.get("success", False),
-            message="Input '{}' dikirim. Output: {}".format(input, out[:500]),
+            message="{}Input '{}' dikirim. Output: {}".format(fallback_warning, input, out[:500]),
             data={"id": id, "input": input, "output": out},
         )
     return ToolResult(
         success=True,
-        message="Session '{}' tidak memiliki command aktif.".format(id),
+        message="{}Session '{}' tidak memiliki command aktif.".format(fallback_warning, id),
         data={"id": id, "found": True, "active": False},
     )
 
@@ -649,10 +684,13 @@ class ShellTool(BaseTool):
             "Execute commands in a specified shell session via E2B cloud sandbox. "
             "Use for: running code/scripts, installing packages, file management, "
             "starting services, checking system status. "
-            "Commands run in an isolated cloud environment."
+            "Commands run in an isolated cloud environment. "
+            "This creates a new session or reuses an existing one with the given id. "
+            "Sessions are NOT persistent across backend restarts — if a session is lost, "
+            "call shell_exec again to recreate it."
         ),
         parameters={
-            "id": {"type": "string", "description": "Unique identifier of the target shell session (e.g. 'main', 'build', 'test')"},
+            "id": {"type": "string", "description": "Unique session identifier (e.g. 'main', 'build', 'test'). Use the SAME id across shell_exec, shell_view, shell_wait, shell_write_to_process, and shell_kill_process to operate on the same session. A session must be created with shell_exec before it can be used by other shell tools."},
             "exec_dir": {"type": "string", "description": "Working directory for command execution. Default: /home/user/dzeck-ai"},
             "command": {"type": "string", "description": "Shell command to execute (bash syntax supported)"},
         },
@@ -663,8 +701,13 @@ class ShellTool(BaseTool):
 
     @tool(
         name="shell_view",
-        description="View the content of a specified shell session.",
-        parameters={"id": {"type": "string", "description": "Unique identifier of the target shell session"}},
+        description=(
+            "View the current output/status of a shell session. "
+            "The session must have been created first with shell_exec using the same id. "
+            "Sessions are NOT persistent across backend restarts — if a session is not found, "
+            "recreate it with shell_exec."
+        ),
+        parameters={"id": {"type": "string", "description": "Session identifier — must match the id used in shell_exec when the session was created. Use the SAME id consistently across all shell tool calls for the same session."}},
         required=["id"],
     )
     def _shell_view(self, id: str) -> ToolResult:
@@ -672,9 +715,13 @@ class ShellTool(BaseTool):
 
     @tool(
         name="shell_wait",
-        description="Wait N seconds then show session status.",
+        description=(
+            "Wait N seconds then show session status. "
+            "The session must have been created first with shell_exec using the same id. "
+            "Sessions are NOT persistent across backend restarts."
+        ),
         parameters={
-            "id": {"type": "string", "description": "Unique identifier of the target shell session"},
+            "id": {"type": "string", "description": "Session identifier — must match the id used in shell_exec when the session was created. Use the SAME id consistently across all shell tool calls for the same session."},
             "seconds": {"type": "integer", "description": "Seconds to wait (1-120, default 5)"},
         },
         required=["id"],
@@ -684,9 +731,15 @@ class ShellTool(BaseTool):
 
     @tool(
         name="shell_write_to_process",
-        description="Send input to a running process in a shell session.",
+        description=(
+            "Send input to a running process in a shell session. "
+            "The session must have been created first with shell_exec using the same id. "
+            "If the given id is not found but exactly one session exists, it will automatically "
+            "use that session. Sessions are NOT persistent across backend restarts — if a session "
+            "is not found, recreate it with shell_exec."
+        ),
         parameters={
-            "id": {"type": "string", "description": "Unique identifier of the target shell session"},
+            "id": {"type": "string", "description": "Session identifier — must match the id used in shell_exec when the session was created. Use the SAME id consistently across all shell tool calls for the same session."},
             "input": {"type": "string", "description": "Input content to send"},
             "press_enter": {"type": "boolean", "description": "Whether to press Enter after input (default true)"},
         },
@@ -697,8 +750,12 @@ class ShellTool(BaseTool):
 
     @tool(
         name="shell_kill_process",
-        description="Terminate a shell session.",
-        parameters={"id": {"type": "string", "description": "Unique identifier of the target shell session"}},
+        description=(
+            "Terminate a shell session and remove it from active sessions. "
+            "The session must have been created first with shell_exec using the same id. "
+            "Sessions are NOT persistent across backend restarts."
+        ),
+        parameters={"id": {"type": "string", "description": "Session identifier — must match the id used in shell_exec when the session was created. Use the SAME id consistently across all shell tool calls for the same session."}},
         required=["id"],
     )
     def _shell_kill_process(self, id: str) -> ToolResult:
