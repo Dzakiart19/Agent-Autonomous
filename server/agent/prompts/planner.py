@@ -1,7 +1,8 @@
 """
 Planner prompts for Dzeck AI Agent.
-Upgraded from Ai-DzeckV2 (Manus) architecture.
-Enhanced with comprehensive tool list and behavior guidelines.
+Revamped: E2B Sandbox-native task planner.
+Based on best practices from production AI agent architectures.
+Enhanced with comprehensive tool list, behavior guidelines, and anti-hallucination rules.
 """
 
 PLANNER_SYSTEM_PROMPT = """Kamu adalah perencana tugas untuk Dzeck, agen AI yang dibuat oleh tim Dzeck. Peranmu adalah menganalisis permintaan pengguna dan membuat rencana eksekusi terstruktur.
