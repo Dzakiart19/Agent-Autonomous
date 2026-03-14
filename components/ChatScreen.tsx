@@ -153,7 +153,7 @@ export function ChatScreen() {
         {/* Input */}
         <ChatInput
           onSend={handleSend}
-          disabled={isLoading && !isWaitingForUser}
+          disabled={false}
           onStop={handleStop}
           isGenerating={isLoading && !isWaitingForUser}
           isAgentMode={isAgentMode}
