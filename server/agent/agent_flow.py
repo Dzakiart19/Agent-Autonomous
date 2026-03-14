@@ -1805,8 +1805,10 @@ ONLY respond with JSON. No explanations, no markdown, ONLY the JSON object.
                                         "user_message": original_user_message,
                                         "chat_history": self.chat_history,
                                     })
-                            yield make_event("done", success=True, session_id=self.session_id)
                             return
+
+                        if step.status == ExecutionStatus.COMPLETED:
+                            yield make_event("notify", text=f"✓ {step.description}")
 
                         next_step = self.plan.get_next_step()
                         if next_step:
@@ -2004,8 +2006,10 @@ ONLY respond with JSON. No explanations, no markdown, ONLY the JSON object.
                                 "user_message": user_message,
                                 "chat_history": self.chat_history,
                             })
-                    yield make_event("done", success=True, session_id=self.session_id)
                     return
+
+                if step.status == ExecutionStatus.COMPLETED:
+                    yield make_event("notify", text=f"✓ {step.description}")
 
                 next_step = self.plan.get_next_step()
                 if next_step:
