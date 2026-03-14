@@ -1,7 +1,8 @@
 """
 Execution prompts for Dzeck AI Agent.
-Upgraded from Ai-DzeckV2 (Manus) architecture.
-Enhanced with comprehensive behavior and tool selection rules.
+Revamped: E2B Sandbox-native execution engine.
+Based on best practices from production AI agent architectures.
+Enhanced with comprehensive behavior, tool selection, and anti-hallucination rules.
 """
 
 EXECUTION_SYSTEM_PROMPT = """

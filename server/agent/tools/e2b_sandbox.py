@@ -1,9 +1,11 @@
 """
 E2B Sandbox Manager for Dzeck AI Agent.
+Revamped: E2B Sandbox-native execution environment.
 Provides a persistent, isolated cloud sandbox for shell and browser automation.
 All tool calls (shell, browser) are routed through this secure E2B environment.
 Uses E2B v2 API: Sandbox.create() pattern.
-Enhanced with: auto-retry, health check, keepalive, robust file I/O.
+Enhanced with: auto-retry, health check, keepalive, robust file I/O,
+session-aware workspace, and file cache replay on sandbox recreation.
 """
 import os
 import json
