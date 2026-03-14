@@ -32,6 +32,61 @@ def todo_write(items: List[str], title: Optional[str] = None) -> ToolResult:
         return ToolResult(success=False, message=f"Failed to write todo: {e}")
 
 
+def _word_overlap_score(a: str, b: str) -> float:
+    """Return ratio of shared words between two strings (0.0 to 1.0)."""
+    words_a = set(a.lower().split())
+    words_b = set(b.lower().split())
+    if not words_a or not words_b:
+        return 0.0
+    shared = words_a & words_b
+    return len(shared) / max(len(words_a), len(words_b))
+
+
+def _find_best_match(lines: List[str], item_text: str, marker: str) -> Optional[int]:
+    """
+    Find the best matching line index for item_text with given marker.
+    Tries (in order): exact → case-insensitive → substring → word-overlap (>=50%).
+    Returns line index or None if not found.
+    """
+    item_stripped = item_text.strip()
+    item_lower = item_stripped.lower()
+
+    candidates = []
+    for i, line in enumerate(lines):
+        if not line.startswith(marker):
+            continue
+        line_content = line[len(marker):].strip()
+        candidates.append((i, line_content))
+
+    if not candidates:
+        return None
+
+    for i, content in candidates:
+        if content == item_stripped:
+            return i
+
+    for i, content in candidates:
+        if content.lower() == item_lower:
+            return i
+
+    for i, content in candidates:
+        if item_lower in content.lower() or content.lower() in item_lower:
+            return i
+
+    best_idx = None
+    best_score = 0.0
+    for i, content in candidates:
+        score = _word_overlap_score(item_stripped, content)
+        if score > best_score:
+            best_score = score
+            best_idx = i
+
+    if best_score >= 0.5:
+        return best_idx
+
+    return None
+
+
 def todo_update(item_text: str, completed: bool = True) -> ToolResult:
     """Update a single item in todo.md by marking it completed or uncompleted."""
     if not os.path.exists(TODO_FILE):
@@ -43,32 +98,53 @@ def todo_update(item_text: str, completed: bool = True) -> ToolResult:
         old_marker = "- [ ]" if completed else "- [x]"
         new_marker = "- [x]" if completed else "- [ ]"
 
-        search = f"{old_marker} {item_text}"
-        if search not in content:
-            if f"{new_marker} {item_text}" in content:
+        lines = content.splitlines(keepends=True)
+
+        idx = _find_best_match(lines, item_text, old_marker + " ")
+        if idx is None:
+            already_idx = _find_best_match(lines, item_text, new_marker + " ")
+            if already_idx is not None:
                 status = "completed" if completed else "uncompleted"
+                matched_text = lines[already_idx][len(new_marker) + 1:].strip()
                 return ToolResult(
                     success=True,
-                    message=f"Item already marked as {status}: {item_text}",
-                    data={"type": "todo_update", "item": item_text, "already_done": True},
+                    message=f"Item already marked as {status}: {matched_text}",
+                    data={"type": "todo_update", "item": matched_text, "already_done": True},
                 )
             return ToolResult(
                 success=False,
-                message=f"Item not found in todo.md: '{item_text}'. Check exact text.",
+                message=(
+                    f"Item not found in todo.md: '{item_text}'. "
+                    f"Available items: {_list_todo_items(content)}"
+                ),
             )
 
-        content = content.replace(search, f"{new_marker} {item_text}", 1)
+        matched_line = lines[idx]
+        matched_text = matched_line[len(old_marker) + 1:].strip()
+        lines[idx] = f"{new_marker} {matched_text}\n"
+
+        new_content = "".join(lines)
         with open(TODO_FILE, "w", encoding="utf-8") as f:
-            f.write(content)
+            f.write(new_content)
 
         status = "completed" if completed else "uncompleted"
         return ToolResult(
             success=True,
-            message=f"Todo item marked {status}: {item_text}",
-            data={"type": "todo_update", "item": item_text, "completed": completed},
+            message=f"Todo item marked {status}: {matched_text}",
+            data={"type": "todo_update", "item": matched_text, "completed": completed},
         )
     except Exception as e:
         return ToolResult(success=False, message=f"Failed to update todo: {e}")
+
+
+def _list_todo_items(content: str) -> str:
+    """Return a readable list of all todo items for debugging."""
+    items = []
+    for line in content.splitlines():
+        line = line.strip()
+        if line.startswith("- [ ]") or line.startswith("- [x]"):
+            items.append(line[6:].strip())
+    return str(items) if items else "(none)"
 
 
 def todo_read() -> ToolResult:
@@ -136,13 +212,14 @@ class TodoTool(BaseTool):
         name="todo_update",
         description=(
             "Mark a specific todo item as completed or uncompleted. "
-            "Use the EXACT text of the item as it appears in the TodoList. "
+            "Use the text of the item as it appears in the TodoList — "
+            "partial or approximate text is accepted if exact match is not found. "
             "Call this immediately after completing each step to keep progress visible."
         ),
         parameters={
             "item_text": {
                 "type": "string",
-                "description": "Exact text of the todo item to update",
+                "description": "Text of the todo item to update (exact or approximate)",
             },
             "completed": {
                 "type": "boolean",
