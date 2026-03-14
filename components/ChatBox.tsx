@@ -32,9 +32,10 @@ export function ChatBox({
 }: ChatBoxProps) {
   const inputRef = useRef<TextInput>(null);
 
-  const inputEditable = !isLoading || isWaitingForUser;
-  const showSendButton = !isLoading || isWaitingForUser;
-  const canSend = value.trim().length > 0 && inputEditable;
+  // Always allow typing — user can revise AI's task at any time
+  const inputEditable = true;
+  const showSendButton = true;
+  const canSend = value.trim().length > 0;
 
   const placeholder = isWaitingForUser
     ? "Ketik balasan Anda..."
@@ -68,24 +69,23 @@ export function ChatBox({
         </View>
 
         <View style={styles.toolbarRight}>
-          {isLoading && !isWaitingForUser ? (
+          {isLoading && !isWaitingForUser && (
             <TouchableOpacity onPress={onStop} style={styles.toolbarBtn} activeOpacity={0.6}>
               <View style={styles.stopIcon}>
                 <Ionicons name="stop" size={14} color="#FFFFFF" />
               </View>
             </TouchableOpacity>
-          ) : (
-            <TouchableOpacity
-              onPress={onSubmit}
-              style={[styles.toolbarBtn, !canSend && styles.sendButtonDisabled]}
-              activeOpacity={0.6}
-              disabled={!canSend}
-            >
-              <View style={[styles.sendIconContainer, !canSend && styles.sendIconDisabled]}>
-                <Ionicons name="arrow-up" size={16} color="#FFFFFF" />
-              </View>
-            </TouchableOpacity>
           )}
+          <TouchableOpacity
+            onPress={onSubmit}
+            style={[styles.toolbarBtn, !canSend && styles.sendButtonDisabled]}
+            activeOpacity={0.6}
+            disabled={!canSend}
+          >
+            <View style={[styles.sendIconContainer, !canSend && styles.sendIconDisabled]}>
+              <Ionicons name="arrow-up" size={16} color="#FFFFFF" />
+            </View>
+          </TouchableOpacity>
         </View>
       </View>
     </View>

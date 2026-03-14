@@ -69,7 +69,7 @@ export function ChatInput({ onSend, disabled, onStop, isGenerating, placeholder,
     setAttachments((prev) => prev.filter((_, i) => i !== index));
   };
 
-  const canSend = (text.trim().length > 0 || attachments.length > 0) && !disabled;
+  const canSend = text.trim().length > 0 || attachments.length > 0;
 
   return (
     <View style={styles.container}>
@@ -106,7 +106,7 @@ export function ChatInput({ onSend, disabled, onStop, isGenerating, placeholder,
           onChangeText={setText}
           multiline
           maxLength={4000}
-          editable={!disabled}
+          editable={true}
           onSubmitEditing={Platform.OS === "web" ? handleSend : undefined}
           blurOnSubmit={false}
         />

@@ -1659,10 +1659,17 @@ ONLY respond with JSON. No explanations, no markdown, ONLY the JSON object.
             )
             parsed = self._parse_response(response_text)
             if parsed and "steps" in parsed:
-                new_steps = [
-                    Step(id=str(s.get("id", "")), description=s.get("description", ""))
-                    for s in parsed["steps"]
-                ]
+                new_steps = []
+                for s in parsed["steps"]:
+                    ns = Step(id=str(s.get("id", "")), description=s.get("description", ""))
+                    # IMPORTANT: Force all new/remaining steps to PENDING status.
+                    # The LLM might hallucinate completed status for steps that
+                    # haven't actually been executed yet. Only the execution loop
+                    # should mark steps as completed/failed.
+                    ns.status = ExecutionStatus.PENDING
+                    ns.success = False
+                    ns.result = None
+                    new_steps.append(ns)
                 first_pending = None
                 for i, s in enumerate(plan.steps):
                     if not s.is_done():

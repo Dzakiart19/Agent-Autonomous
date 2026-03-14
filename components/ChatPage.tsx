@@ -108,10 +108,38 @@ export function ChatPage({
         setMessages(prev => [...prev, planMsg]);
         setThinking({ active: true, label: planData.title || "Membuat rencana...", stepLabel: planData.title });
       } else if (planData && planMsgIdRef.current) {
-        // Update existing plan card
-        currentPlanRef.current = planData;
+        // When updating an existing plan, preserve step statuses that were set
+        // by explicit "step" events. The plan event from the backend might contain
+        // stale or incorrect step statuses (e.g. LLM hallucinating completion).
+        // Only trust step status changes from explicit "step" events.
+        const currentPlan = currentPlanRef.current;
+        let mergedPlan = planData;
+        if (currentPlan && planStatus !== "created") {
+          // Build a map of step statuses we've seen from explicit step events
+          const knownStepStatuses = new Map<string, AgentPlanStep>();
+          for (const s of currentPlan.steps) {
+            if (s.status === "completed" || s.status === "failed" || s.status === "running") {
+              knownStepStatuses.set(s.id, s);
+            }
+          }
+          // Merge: keep known completed/failed/running statuses, accept new steps
+          const mergedSteps = planData.steps.map(newStep => {
+            const known = knownStepStatuses.get(newStep.id);
+            if (known) {
+              // Keep the status we got from explicit step events
+              return { ...newStep, status: known.status, result: known.result || newStep.result };
+            }
+            // For steps not yet seen, ensure they stay pending (don't trust backend "completed")
+            if (newStep.status === "completed" && !knownStepStatuses.has(newStep.id)) {
+              return { ...newStep, status: "pending" as const };
+            }
+            return newStep;
+          });
+          mergedPlan = { ...planData, steps: mergedSteps };
+        }
+        currentPlanRef.current = mergedPlan;
         setMessages(prev => prev.map(m =>
-          m.id === planMsgIdRef.current ? { ...m, plan: planData } : m
+          m.id === planMsgIdRef.current ? { ...m, plan: mergedPlan } : m
         ));
         if (planStatus === "completed") {
           setThinking({ active: false, label: "" });
@@ -360,9 +388,9 @@ export function ChatPage({
 
   const handleSubmit = useCallback(async () => {
     if (!inputMessage.trim()) return;
-    if (isLoading && !isWaitingForUser) return;
 
-    if (isWaitingForUser && cancelRef.current) {
+    // Always allow sending — if AI is working, cancel current task and start new one
+    if (cancelRef.current) {
       cancelRef.current();
       cancelRef.current = null;
     }
@@ -376,6 +404,7 @@ export function ChatPage({
     };
 
     const wasContinuation = isWaitingForUser;
+    const wasLoading = isLoading;
 
     setMessages(prev => [...prev, userMsg]);
     const msgText = inputMessage.trim();
@@ -384,7 +413,9 @@ export function ChatPage({
     isWaitingRef.current = false;
     setIsWaitingForUser(false);
     setTools([]);
-    if (!wasContinuation) {
+    // When user sends a new message (not a continuation reply), reset the plan
+    // This allows user to revise the AI's task mid-execution
+    if (!wasContinuation || wasLoading) {
       setStepHistory([]);
       planMsgIdRef.current = null;
       currentPlanRef.current = null;
