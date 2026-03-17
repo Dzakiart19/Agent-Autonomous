@@ -1624,6 +1624,456 @@ ONLY respond with JSON. No explanations, no markdown, ONLY the JSON object.
         step.result = "Step incomplete (max iterations reached)"
         yield make_event("step", status=StepStatus.FAILED.value, step=step.to_dict())
 
+    async def _manus_execute_step_for_agent(
+        self,
+        step: Step,
+        user_message: str,
+        system_prompt: str,
+        tool_schemas: List[Dict[str, Any]],
+        context: str = "",
+        shared_data: Optional[Dict[str, Any]] = None,
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        Execute a single Manus sub-task step using the existing _run_tool_streaming
+        infrastructure (preserves tool_stream, file tracking, E2B sync, SSE semantics).
+
+        This is the inner execution engine for _run_with_manus_async.  It drives a
+        per-agent LLM loop exactly like execute_step_async does for the standard
+        Plan-Act mode, but uses the agent-specific system prompt and filtered tool
+        schemas.  All tool calls are routed through _run_tool_streaming so that
+        tool_stream events, deliverable-file tracking (self._created_files), and
+        E2B file sync work identically to the standard execution path.
+
+        Yields regular SSE events (step/tool/tool_stream/notify) and a special
+        __manus_done__ sentinel carrying structured results for inter-agent handoff.
+        """
+        loop = asyncio.get_event_loop()
+
+        context_section = ""
+        if context:
+            context_section = "\n\nKonteks dari agent sebelumnya:\n{}".format(context)
+        if shared_data:
+            shared_summary = json.dumps(shared_data, ensure_ascii=False, default=str)[:1500]
+            context_section += "\n\nData bersama:\n{}".format(shared_summary)
+
+        exec_messages: List[Dict[str, Any]] = [
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": (
+                    "Tugas: {}\n{}\n\n"
+                    "Tugas utama user: {}\n\n"
+                    "Gunakan tools yang tersedia untuk menyelesaikan tugas. "
+                    "Panggil idle saat selesai."
+                ).format(step.description, context_section, user_message),
+            },
+        ]
+
+        collected_results: List[str] = []
+
+        _TEXT_TOOL_INSTRUCTION = """
+IMPORTANT: This model uses TEXT-BASED tool calling. You do NOT have native function calling.
+To call a tool, respond with ONLY a JSON object in this format:
+{"tool": "tool_name", "args": {"param": "value"}}
+
+To signal step completion, respond with:
+{"done": true, "success": true, "result": "summary of what was done"}
+
+ONLY respond with JSON. No explanations, no markdown, ONLY the JSON object.
+"""
+
+        def _build_system_content() -> str:
+            return system_prompt + (_TEXT_TOOL_INSTRUCTION if _TOOLS_SUPPORTED is False else "")
+
+        exec_messages[0] = {"role": "system", "content": _build_system_content()}
+
+        _prev_manus_tools_supported = _TOOLS_SUPPORTED
+
+        for iteration in range(self.max_tool_iterations):
+            try:
+                if _TOOLS_SUPPORTED != _prev_manus_tools_supported:
+                    _prev_manus_tools_supported = _TOOLS_SUPPORTED
+                    exec_messages[0] = {"role": "system", "content": _build_system_content()}
+
+                _msgs = list(exec_messages)
+                api_result = await loop.run_in_executor(
+                    None,
+                    lambda: call_api_with_retry(_msgs, tools=tool_schemas),
+                )
+                text, tool_calls = _extract_cf_response(api_result)
+
+                if tool_calls:
+                    step_done = False
+                    for tc_idx, tc in enumerate(tool_calls):
+                        fn_name = tc.get("name", "")
+                        fn_args = tc.get("arguments", {})
+                        if isinstance(fn_args, str):
+                            try:
+                                fn_args = json.loads(fn_args)
+                            except Exception:
+                                fn_args = {}
+
+                        tc_id = "manus_{}_{}_{}".format(step.id, iteration, tc_idx)
+                        result_str = "Done"
+
+                        async for ev in self._run_tool_streaming(fn_name, fn_args, tc_id, step):
+                            if ev.get("type") == "__step_done__":
+                                step_done = True
+                                break
+                            elif ev.get("type") == "__result__":
+                                result_str = ev.get("value", "Done")
+                                collected_results.append(result_str)
+                            else:
+                                yield ev
+
+                        if step_done:
+                            break
+
+                        exec_messages.append({
+                            "role": "user",
+                            "content": (
+                                "Result of {}: {}\n\nLanjutkan. Panggil idle saat langkah selesai."
+                            ).format(fn_name, result_str),
+                        })
+
+                    if step_done:
+                        yield {
+                            "type": "__manus_done__",
+                            "success": step.success,
+                            "result": step.result or "",
+                            "collected_results": collected_results,
+                        }
+                        return
+                    if len(exec_messages) > 20:
+                        exec_messages = _compact_exec_messages(exec_messages)
+                    continue
+
+                if text:
+                    parsed = self._parse_response(text)
+
+                    if parsed.get("done"):
+                        step.status = ExecutionStatus.COMPLETED
+                        step.success = _coerce_bool(parsed.get("success"), default=True)
+                        step.result = parsed.get("result", "Step completed")
+                        if not step.success:
+                            step.status = ExecutionStatus.FAILED
+                        status_enum = StepStatus.COMPLETED if step.success else StepStatus.FAILED
+                        yield make_event("step", status=status_enum.value, step=step.to_dict())
+                        yield {
+                            "type": "__manus_done__",
+                            "success": step.success,
+                            "result": step.result or "",
+                            "collected_results": collected_results,
+                        }
+                        return
+
+                    if parsed.get("thinking"):
+                        exec_messages.append({"role": "assistant", "content": text})
+                        exec_messages.append({"role": "user", "content": "Lanjutkan dengan menggunakan tool."})
+                        continue
+
+                    if parsed.get("tool"):
+                        tool_name = parsed["tool"]
+                        tool_args = parsed.get("args", {})
+                        resolved_name = resolve_tool_name(tool_name)
+
+                        if resolved_name is None:
+                            exec_messages.append({"role": "assistant", "content": text})
+                            exec_messages.append({
+                                "role": "user",
+                                "content": "Unknown tool '{}'. Coba tool yang tersedia.".format(tool_name),
+                            })
+                            continue
+
+                        tc_id = "manus_{}_{}_json".format(step.id, iteration)
+                        result_str = "Done"
+                        step_done = False
+
+                        async for ev in self._run_tool_streaming(resolved_name, tool_args, tc_id, step):
+                            if ev.get("type") == "__step_done__":
+                                step_done = True
+                                break
+                            elif ev.get("type") == "__result__":
+                                result_str = ev.get("value", "Done")
+                                collected_results.append(result_str)
+                            else:
+                                yield ev
+
+                        if step_done:
+                            yield {
+                                "type": "__manus_done__",
+                                "success": step.success,
+                                "result": step.result or "",
+                                "collected_results": collected_results,
+                            }
+                            return
+
+                        exec_messages.append({
+                            "role": "user",
+                            "content": "Result of {}: {}\n\nLanjutkan atau panggil idle.".format(resolved_name, result_str),
+                        })
+                        if len(exec_messages) > 20:
+                            exec_messages = _compact_exec_messages(exec_messages)
+                        continue
+
+                exec_messages.append({"role": "assistant", "content": text or "(empty response)"})
+                exec_messages.append({
+                    "role": "user",
+                    "content": (
+                        "Respond ONLY with a JSON tool call or completion signal. "
+                        "Example: {\"done\": true, \"success\": true, \"result\": \"summary\"}"
+                    ),
+                })
+                continue
+
+            except Exception as e:
+                yield make_event("error", error="Manus step error: {}".format(e))
+                step.status = ExecutionStatus.FAILED
+                step.error = str(e)
+                yield make_event("step", status=StepStatus.FAILED.value, step=step.to_dict())
+                yield {
+                    "type": "__manus_done__",
+                    "success": False,
+                    "result": "Error: {}".format(e),
+                    "collected_results": collected_results,
+                }
+                return
+
+        step.status = ExecutionStatus.FAILED
+        step.result = "Step incomplete (max iterations reached)"
+        yield make_event("step", status=StepStatus.FAILED.value, step=step.to_dict())
+        yield {
+            "type": "__manus_done__",
+            "success": False,
+            "result": step.result,
+            "collected_results": collected_results,
+        }
+
+    async def _run_with_manus_async(
+        self,
+        user_message: str,
+        svc: Any,
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        Execute the current plan using the Manus multi-agent architecture.
+
+        Pipeline:
+          1. Hydrate ManusCoordinator.memory from self.chat_history for context-awareness
+          2. ManusCoordinator.decompose_task() → SubTask[] with dependency graph
+          3. ExecutionCombiner.run_all() (primary orchestrator):
+               - Dependency-aware batching (_build_execution_order)
+               - Routes each subtask to self._manus_execute_step_for_agent()
+                 via injected subtask_executor callback
+               - Tracks ExecutionResult per subtask with structured data
+               - Provides inter-agent data sharing (output A → input B)
+          4. Per-subtask executor: _manus_execute_step_for_agent()
+               - Agent-specific system prompt + filtered tool schemas
+               - ALL tool calls routed through _run_tool_streaming()
+                 (preserves tool_stream, self._created_files, E2B sync)
+          5. Plan steps mapped to subtasks (or extended) for frontend display
+          6. Update coordinator memory with the interaction result
+
+        All SSE events (step, tool, tool_stream, notify, plan, message, done)
+        are preserved exactly as in the standard Plan-Act loop.
+
+        Raises on fatal error so the caller can fall back to standard mode.
+        """
+        from server.agent.coordinator import ManusCoordinator
+        from server.agent.execution_combiner import ExecutionCombiner
+
+        # ── 1. Hydrate coordinator memory from chat history ──────────────────
+        # Use self.memory directly (shared with DzeckAgent) so that memory
+        # accumulated across this session is already available. Top it up with
+        # any recent chat history not yet in memory.
+        coordinator = ManusCoordinator(memory=self.memory)
+        if self.chat_history and self.memory.empty:
+            for msg in self.chat_history[-10:]:
+                role = msg.get("role", "")
+                content = msg.get("content", "")
+                if role in ("user", "assistant") and content:
+                    coordinator.memory.add_message({"role": role, "content": str(content)[:500]})
+
+        # ── 2. Decompose task via coordinator ────────────────────────────────
+        decomposition = await coordinator.decompose_task(
+            user_message, chat_history=self.chat_history
+        )
+
+        sys.stderr.write(
+            "[Manus] Decomposed into {} sub-tasks (single_agent={})\n".format(
+                len(decomposition.subtasks),
+                decomposition.needs_single_agent,
+            )
+        )
+        sys.stderr.flush()
+
+        # ── Plan step mapping ────────────────────────────────────────────────
+        plan_step_idx = 0
+        plan_steps = list(self.plan.steps)
+        step_by_task_id: Dict[str, Step] = {}
+
+        def _get_or_create_step(task_id: str, description: str) -> Step:
+            nonlocal plan_step_idx
+            if plan_step_idx < len(plan_steps):
+                s = plan_steps[plan_step_idx]
+                plan_step_idx += 1
+            else:
+                s = Step(id="manus_{}".format(task_id), description=description)
+                self.plan.steps.append(s)
+                plan_steps.append(s)
+                plan_step_idx += 1
+            step_by_task_id[task_id] = s
+            return s
+
+        for subtask in decomposition.subtasks:
+            _get_or_create_step(subtask.task_id, subtask.description)
+
+        # ── 3. Build subtask_executor callback for ExecutionCombiner ─────────
+        # This callback is the bridge between ExecutionCombiner.run_all() and
+        # DzeckAgent._manus_execute_step_for_agent(), routing every tool call
+        # through the existing _run_tool_streaming infrastructure.
+        async def _subtask_executor(subtask, context: str, shared_data: Dict):
+            step = step_by_task_id.get(subtask.task_id)
+            if step is None:
+                step = _get_or_create_step(subtask.task_id, subtask.description)
+
+            step.status = ExecutionStatus.RUNNING
+            self.plan.current_step_id = step.id
+            yield make_event("step", status=StepStatus.RUNNING.value, step=step.to_dict())
+
+            agent_instance = coordinator.get_agent_for_type(subtask.agent_type)
+            agent_system_prompt = agent_instance.system_prompt
+            agent_tool_schemas_raw = agent_instance.get_tool_schemas()
+
+            tool_schemas_for_cf = []
+            for s in agent_tool_schemas_raw:
+                name = s.get("name", "")
+                if name:
+                    tool_schemas_for_cf.append({
+                        "type": "function",
+                        "function": {
+                            "name": name,
+                            "description": s.get("description", ""),
+                            "parameters": s.get("parameters", {"type": "object", "properties": {}}),
+                        },
+                    })
+
+            collected_results_list: List[str] = []
+            step_success = False
+            step_result = "Agent did not complete"
+
+            async for ev in self._manus_execute_step_for_agent(
+                step=step,
+                user_message=user_message,
+                system_prompt=agent_system_prompt,
+                tool_schemas=tool_schemas_for_cf,
+                context=context,
+                shared_data=shared_data if shared_data else None,
+            ):
+                if ev.get("type") == "__manus_done__":
+                    step_success = bool(ev.get("success", False))
+                    step_result = str(ev.get("result", ""))
+                    collected_results_list = ev.get("collected_results", [])
+                else:
+                    yield ev
+
+            if step.status not in (ExecutionStatus.COMPLETED, ExecutionStatus.FAILED):
+                step.success = step_success
+                step.result = (step_result or "Done")[:2000]
+                step.status = ExecutionStatus.COMPLETED if step_success else ExecutionStatus.FAILED
+                status_enum = StepStatus.COMPLETED if step_success else StepStatus.FAILED
+                yield make_event("step", status=status_enum.value, step=step.to_dict())
+
+            if step_success:
+                yield make_event("notify", text="✓ {}".format(step.description))
+
+            if svc and self.session_id:
+                try:
+                    await svc.save_step_completed(self.session_id, step.to_dict())
+                except Exception:
+                    pass
+
+            yield {
+                "type": "__manus_done__",
+                "success": step_success,
+                "result": step_result or "",
+                "data": {
+                    "collected_outputs": collected_results_list,
+                    "step_result": step_result or "",
+                    "agent_type": subtask.agent_type,
+                },
+            }
+
+        # ── 4. Execute all sub-tasks via ExecutionCombiner.run_all() ─────────
+        combiner = ExecutionCombiner(
+            coordinator=coordinator,
+            subtask_executor=_subtask_executor,
+        )
+
+        async for combiner_event in combiner.run_all(decomposition):
+            ev_type = combiner_event.get("type", "")
+            if ev_type in ("execution_start", "batch_start", "batch_done"):
+                pass
+            elif ev_type == "execution_done":
+                pass
+            else:
+                yield combiner_event
+
+        # ── 5. Clean up and finalize plan ────────────────────────────────────
+        for s in self.plan.steps:
+            if s.status == ExecutionStatus.RUNNING:
+                s.status = ExecutionStatus.FAILED
+                s.success = False
+                if not s.result:
+                    s.result = "Step did not complete"
+                yield make_event("step", status=StepStatus.FAILED.value, step=s.to_dict())
+
+        self.plan.status = ExecutionStatus.COMPLETED
+        yield make_event(
+            "plan",
+            status=PlanStatus.COMPLETED.value,
+            plan=safe_plan_dict(self.plan),
+        )
+
+        # ── 6. Stream final summary ───────────────────────────────────────────
+        summary_chunks: List[str] = []
+
+        async def _summarize_manus():
+            async for ev in self.summarize_async(self.plan, user_message):
+                if ev.get("type") == "message_chunk":
+                    summary_chunks.append(ev.get("chunk", ""))
+                yield ev
+
+        async for ev in _summarize_manus():
+            yield ev
+
+        self.state = FlowState.COMPLETED
+
+        # ── 7. Update coordinator memory with result ──────────────────────────
+        summary_text = "".join(summary_chunks)
+        coordinator.update_memory("user", user_message)
+        if summary_text:
+            coordinator.update_memory("assistant", summary_text[:1000])
+
+        if summary_text:
+            self.chat_history.append({"role": "user", "content": user_message})
+            self.chat_history.append({"role": "assistant", "content": summary_text})
+            if self.session_id and svc:
+                try:
+                    await svc.save_chat_history(self.session_id, self.chat_history[-40:])
+                except Exception:
+                    pass
+
+        if self.session_id and svc:
+            try:
+                await svc.complete_session(self.session_id, success=True)
+            except Exception:
+                pass
+
+        if self._created_files:
+            yield make_event("files", files=self._created_files)
+
+        yield make_event("done", success=True, session_id=self.session_id)
+
     async def update_plan_async(
         self,
         plan: Plan,
@@ -2078,92 +2528,119 @@ ONLY respond with JSON. No explanations, no markdown, ONLY the JSON object.
 
             yield make_event("plan", status=PlanStatus.RUNNING.value, plan=safe_plan_dict(self.plan))
 
-            step_waiting = False
-            _step_consecutive_failures: Dict[str, int] = {}
-            _global_consecutive_failures = 0
-            _MAX_GLOBAL_FAILURES = 4
-            while True:
-                step = self.plan.get_next_step()
-                if not step:
-                    break
+            # ── Manus Multi-Agent Architecture ─────────────────────────────────
+            # Default execution path: ManusCoordinator decomposes task into
+            # sub-tasks, ExecutionCombiner routes to specialized agents.
+            # Falls back automatically to the legacy Plan-Act loop on any error.
+            # Set MANUS_DISABLED=1 to force legacy mode (debugging/testing only).
+            _manus_disabled = os.environ.get("MANUS_DISABLED", "").lower() in ("1", "true", "yes")
+            _manus_success = False
+            if not _manus_disabled and self.plan.steps and not is_continuation:
+                try:
+                    async for event in self._run_with_manus_async(
+                        user_message, svc
+                    ):
+                        yield event
+                    _manus_success = True
+                except Exception as _manus_err:
+                    sys.stderr.write(
+                        "[Manus] Manus pipeline failed, falling back to Plan-Act: {}\n".format(_manus_err)
+                    )
+                    sys.stderr.flush()
+                    traceback.print_exc(file=sys.stderr)
+                    _manus_success = False
 
-                self.plan.current_step_id = step.id
+            if _manus_success:
+                # Manus handled full execution including summary and done events
+                return
+            else:
+                # ── Standard Plan-Act Execution Loop ───────────────────────────
                 step_waiting = False
-                async for event in self.execute_step_async(self.plan, step, user_message):
-                    if event.get("type") == "waiting_for_user":
-                        step_waiting = True
-                    yield event
-
-                if not step_waiting and step.status == ExecutionStatus.FAILED:
-                    _global_consecutive_failures += 1
-                    fail_count = _step_consecutive_failures.get(step.id, 0) + 1
-                    _step_consecutive_failures[step.id] = fail_count
-                    if _global_consecutive_failures >= _MAX_GLOBAL_FAILURES:
-                        sys.stderr.write("[agent] Circuit breaker: {} consecutive failures, aborting plan\n".format(_global_consecutive_failures))
-                        yield make_event("notify", text="Terlalu banyak kegagalan berturut-turut. Menghentikan eksekusi.")
+                _step_consecutive_failures: Dict[str, int] = {}
+                _global_consecutive_failures = 0
+                _MAX_GLOBAL_FAILURES = 4
+                while True:
+                    step = self.plan.get_next_step()
+                    if not step:
                         break
-                    elif fail_count < 2:
-                        error_ctx = step.result or step.error or "Unknown failure"
-                        retry_msg = (
-                            f"{user_message}\n\n"
-                            f"[RETRY] Previous attempt for this step FAILED with: {error_ctx}. "
-                            f"Take a DIFFERENT approach. Do NOT repeat the same command or strategy."
-                        )
-                        step.status = ExecutionStatus.PENDING
-                        step.result = None
-                        step.error = None
-                        yield make_event("step", status="retrying", step=step.to_dict())
-                        async for event in self.execute_step_async(self.plan, step, retry_msg):
-                            if event.get("type") == "waiting_for_user":
-                                step_waiting = True
-                            yield event
-                    else:
-                        _step_consecutive_failures.pop(step.id, None)
-                elif not step_waiting:
-                    _global_consecutive_failures = 0
-                    _step_consecutive_failures.pop(step.id, None)
 
-                if not step_waiting and self.session_id and svc:
-                    await svc.save_step_completed(self.session_id, step.to_dict())
+                    self.plan.current_step_id = step.id
+                    step_waiting = False
+                    async for event in self.execute_step_async(self.plan, step, user_message):
+                        if event.get("type") == "waiting_for_user":
+                            step_waiting = True
+                        yield event
 
-                if step_waiting:
-                    # Emit accurate plan snapshot before saving waiting state
-                    for _s in self.plan.steps:
-                        if _s.status == ExecutionStatus.RUNNING:
-                            _s.status = ExecutionStatus.PENDING
-                    yield make_event("plan", status=PlanStatus.WAITING.value, plan=safe_plan_dict(self.plan))
-                    pending = [s.to_dict() for s in self.plan.steps if not s.is_done()]
-                    if self.session_id:
-                        if svc:
-                            await svc.save_waiting_state(
-                                self.session_id,
-                                self.plan.to_dict(),
-                                pending,
-                                user_message,
-                                chat_history=self.chat_history,
+                    if not step_waiting and step.status == ExecutionStatus.FAILED:
+                        _global_consecutive_failures += 1
+                        fail_count = _step_consecutive_failures.get(step.id, 0) + 1
+                        _step_consecutive_failures[step.id] = fail_count
+                        if _global_consecutive_failures >= _MAX_GLOBAL_FAILURES:
+                            sys.stderr.write("[agent] Circuit breaker: {} consecutive failures, aborting plan\n".format(_global_consecutive_failures))
+                            yield make_event("notify", text="Terlalu banyak kegagalan berturut-turut. Menghentikan eksekusi.")
+                            break
+                        elif fail_count < 2:
+                            error_ctx = step.result or step.error or "Unknown failure"
+                            retry_msg = (
+                                f"{user_message}\n\n"
+                                f"[RETRY] Previous attempt for this step FAILED with: {error_ctx}. "
+                                f"Take a DIFFERENT approach. Do NOT repeat the same command or strategy."
                             )
-                            await svc.save_plan_snapshot(self.session_id, self.plan.to_dict())
+                            step.status = ExecutionStatus.PENDING
+                            step.result = None
+                            step.error = None
+                            yield make_event("step", status="retrying", step=step.to_dict())
+                            async for event in self.execute_step_async(self.plan, step, retry_msg):
+                                if event.get("type") == "waiting_for_user":
+                                    step_waiting = True
+                                yield event
                         else:
-                            from server.agent.services.session_service import _file_save_waiting_state
-                            _file_save_waiting_state(self.session_id, {
-                                "waiting_for_user": True,
-                                "plan": self.plan.to_dict(),
-                                "pending_steps": pending,
-                                "user_message": user_message,
-                                "chat_history": self.chat_history,
-                            })
-                    return
+                            _step_consecutive_failures.pop(step.id, None)
+                    elif not step_waiting:
+                        _global_consecutive_failures = 0
+                        _step_consecutive_failures.pop(step.id, None)
 
-                if step.status == ExecutionStatus.COMPLETED:
-                    yield make_event("notify", text=f"✓ {step.description}")
+                    if not step_waiting and self.session_id and svc:
+                        await svc.save_step_completed(self.session_id, step.to_dict())
 
-                next_step = self.plan.get_next_step()
-                if next_step:
-                    yield make_event("plan", status=PlanStatus.UPDATING.value,
-                                     plan=safe_plan_dict(self.plan))
-                    plan_event = await self.update_plan_async(self.plan, step)
-                    if plan_event:
-                        yield plan_event
+                    if step_waiting:
+                        # Emit accurate plan snapshot before saving waiting state
+                        for _s in self.plan.steps:
+                            if _s.status == ExecutionStatus.RUNNING:
+                                _s.status = ExecutionStatus.PENDING
+                        yield make_event("plan", status=PlanStatus.WAITING.value, plan=safe_plan_dict(self.plan))
+                        pending = [s.to_dict() for s in self.plan.steps if not s.is_done()]
+                        if self.session_id:
+                            if svc:
+                                await svc.save_waiting_state(
+                                    self.session_id,
+                                    self.plan.to_dict(),
+                                    pending,
+                                    user_message,
+                                    chat_history=self.chat_history,
+                                )
+                                await svc.save_plan_snapshot(self.session_id, self.plan.to_dict())
+                            else:
+                                from server.agent.services.session_service import _file_save_waiting_state
+                                _file_save_waiting_state(self.session_id, {
+                                    "waiting_for_user": True,
+                                    "plan": self.plan.to_dict(),
+                                    "pending_steps": pending,
+                                    "user_message": user_message,
+                                    "chat_history": self.chat_history,
+                                })
+                        return
+
+                    if step.status == ExecutionStatus.COMPLETED:
+                        yield make_event("notify", text=f"✓ {step.description}")
+
+                    next_step = self.plan.get_next_step()
+                    if next_step:
+                        yield make_event("plan", status=PlanStatus.UPDATING.value,
+                                         plan=safe_plan_dict(self.plan))
+                        plan_event = await self.update_plan_async(self.plan, step)
+                        if plan_event:
+                            yield plan_event
 
             for s in self.plan.steps:
                 if s.status == ExecutionStatus.RUNNING:
